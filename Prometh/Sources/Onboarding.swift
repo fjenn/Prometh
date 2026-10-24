@@ -83,7 +83,7 @@ struct OnboardingView: View {
     }
     var welcome: some View {
         VStack(alignment:.leading,spacing:27) {
-            Text(Product.headline).font(.system(size:64,weight:.medium)).tracking(-2.5).padding(.top,68)
+            Text(Product.headline).font(.system(size:64,weight:.medium)).tracking(-2.5)
             VStack(alignment:.leading,spacing:8) {
                 Text("Fully private.")
                 Text("No accounts.")
@@ -92,13 +92,11 @@ struct OnboardingView: View {
             }.font(.system(size:36,weight:.regular)).tracking(-0.9).foregroundStyle(.white.opacity(0.90))
             Text("Runs on your Mac.").font(.system(size:15)).foregroundStyle(.white.opacity(0.7)).padding(.top,4)
             Button("Get started"){store.next()}.buttonStyle(WelcomeButton()).padding(.top,12)
-            Spacer(minLength:50)
-        }.frame(maxWidth:.infinity,alignment:.leading)
+        }
     }
     var preparing:[Capability] {Capability.allCases.filter{store.state.selected.contains($0)}}
     var capabilities: some View {
         VStack(alignment:.leading,spacing:0) {
-            Spacer(minLength:20)
             VStack(alignment:.leading,spacing:14) {
                 Text("What capabilities do you want to enable?").font(.system(size:32,weight:.medium)).tracking(-1.05)
                 Text("Chat is the default.").font(.system(size:16)).foregroundStyle(.white.opacity(0.72))
@@ -112,9 +110,7 @@ struct OnboardingView: View {
                 Spacer()
                 Button("Continue"){store.next()}.buttonStyle(WelcomeButton())
             }.padding(.top,36)
-            Spacer(minLength:28)
         }
-        .frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.leading)
     }
     func capabilityCard(_ capability:Capability)->some View {
         let selected=store.state.selected.contains(capability),available=store.available(capability),isChat=capability == .chat
@@ -165,27 +161,39 @@ struct OnboardingView: View {
                 Text("Preparing your AI").font(.system(size:37,weight:.medium)).tracking(-1.2)
                 Text(store.chatReady ? "Chat is ready. Open it while the others finish.":"You can start chatting as soon as Chat is ready.")
                     .font(.system(size:14)).foregroundStyle(.white.opacity(0.72))
-            }.padding(.top,18)
-            HStack(alignment:.top,spacing:24) {
-                VStack(alignment:.leading,spacing:2) {
-                    ForEach(Array(preparing.enumerated()),id:\.element.id){index,capability in
-                        if index > 0 {Divider().opacity(0.45)}
-                        PreparationRow(store:store,capability:capability)
-                    }
-                    Divider().opacity(0.45).padding(.top,6)
-                    HStack {
-                        Text("\(store.state.selected.filter{store.state.preparations[$0.rawValue]?.status == .ready}.count) of \(store.state.selected.count) ready").font(.system(size:12)).foregroundStyle(.secondary)
-                        Spacer();Button("Open chat"){store.enterChat()}.buttonStyle(PrimaryButton()).disabled(!store.chatReady).opacity(store.chatReady ? 1:0.5)
-                    }.padding(.top,12)
-                }.padding(22).frame(maxWidth:.infinity,alignment:.leading).glassPanel().foregroundStyle(Color.primary)
-                VStack(alignment:.leading,spacing:18) {
-                    Text("Connect your apps").font(.system(size:20,weight:.medium)).tracking(-0.4)
-                    Text("While you wait, add the apps you want your AI to work with.").font(.system(size:13)).foregroundStyle(.secondary).lineSpacing(4)
-                    ConnectorsList(store:store)
-                    Text("Optional. You can do this later in Customize.").font(.system(size:11)).foregroundStyle(.secondary)
-                }.padding(24).frame(maxWidth:.infinity).glassPanel().foregroundStyle(Color.primary)
             }
+            HStack(alignment:.top,spacing:24) {
+                preparationCard {
+                    VStack(alignment:.leading,spacing:2) {
+                        ForEach(Array(preparing.enumerated()),id:\.element.id){index,capability in
+                            if index > 0 {Divider().opacity(0.45)}
+                            PreparationRow(store:store,capability:capability)
+                        }
+                        Divider().opacity(0.45).padding(.top,6)
+                        HStack {
+                            Text("\(store.state.selected.filter{store.state.preparations[$0.rawValue]?.status == .ready}.count) of \(store.state.selected.count) ready").font(.system(size:12)).foregroundStyle(.secondary)
+                            Spacer();Button("Open chat"){store.enterChat()}.buttonStyle(PrimaryButton()).disabled(!store.chatReady).opacity(store.chatReady ? 1:0.5)
+                        }.padding(.top,12)
+                    }
+                }
+                preparationCard {
+                    VStack(alignment:.leading,spacing:18) {
+                        Text("Connect your apps").font(.system(size:20,weight:.medium)).tracking(-0.4)
+                        Text("While you wait, add the apps you want your AI to work with.").font(.system(size:13)).foregroundStyle(.secondary).lineSpacing(4)
+                        ConnectorsList(store:store)
+                        Text("Optional. You can do this later in Customize.").font(.system(size:11)).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .onPreferenceChange(PanelHeightKey.self) { panelHeight = $0 }
         }
+    }
+    func preparationCard<Content:View>(@ViewBuilder content:()->Content)->some View {
+        content().padding(22)
+            .fixedSize(horizontal:false,vertical:true)
+            .background { GeometryReader { proxy in Color.clear.preference(key:PanelHeightKey.self,value:proxy.size.height) } }
+            .frame(maxWidth:.infinity,minHeight:panelHeight,alignment:.topLeading)
+            .glassPanel().foregroundStyle(Color.primary)
     }
 }
 struct WelcomeButton:ButtonStyle {
@@ -196,21 +204,21 @@ struct EvilSwitch: View {
     @Environment(\.accessibilityReduceMotion) private var reduce
     var body: some View {
         Button { isOn.toggle() } label: {
-            HStack(spacing: 16) {
+            HStack(spacing: 12) {
                 Text("Enable Evil Mode").font(.system(size: 16, weight: .medium))
                 ZStack {
                     Capsule()
-                        .fill(isOn ? Color(hex: 0xC44848) : Color.white.opacity(0.16))
+                        .fill(isOn ? Color(hex: 0xC44848) : Color.white.opacity(0.14))
                     Capsule()
-                        .stroke(Color.white.opacity(isOn ? 0.0 : 0.72), lineWidth: 1.5)
+                        .strokeBorder(Color.white.opacity(isOn ? 0.16 : 0.22), lineWidth: 1)
                     Circle()
                         .fill(Color.white)
-                        .frame(width: 24, height: 24)
-                        .shadow(color: .black.opacity(0.28), radius: 2, y: 1)
+                        .frame(width: 16, height: 16)
+                        .shadow(color: .black.opacity(0.2), radius: 1, y: 0.5)
                         .frame(maxWidth: .infinity, alignment: isOn ? .trailing : .leading)
-                        .padding(4)
+                        .padding(3)
                 }
-                .frame(width: 62, height: 34)
+                .frame(width: 40, height: 22)
             }
         }
         .buttonStyle(.plain)
@@ -224,7 +232,7 @@ struct EvilReveal:View {
     @ObservedObject var store:AppStore
     var body:some View {
         VStack(alignment:.leading,spacing:20) {
-            Text("Evil Mode").font(.system(size:60,weight:.medium)).tracking(-2.2).padding(.top,36)
+            Text("Evil Mode").font(.system(size:60,weight:.medium)).tracking(-2.2)
             Text("An AI that never says no.").font(.system(size:28,weight:.regular)).tracking(-0.6)
             Text("Zero restrictions, including adult content. It does not account for ethical concerns.")
                 .font(.system(size:17)).foregroundStyle(.white.opacity(0.82)).lineSpacing(4).fixedSize(horizontal:false,vertical:true).frame(maxWidth:460,alignment:.leading)
@@ -232,7 +240,7 @@ struct EvilReveal:View {
                 .padding(.top,10)
             Button(store.revealInChat ? "Done":"Continue"){store.chooseEvil(store.state.defaultMode == .evil)}
                 .buttonStyle(PrimaryButton(coral:true)).padding(.top,4)
-        }.frame(maxWidth:640,alignment:.leading).frame(maxWidth:.infinity,alignment:.leading)
+        }.frame(maxWidth:640,alignment:.leading)
     }
 }
 struct PreparationRow:View {
