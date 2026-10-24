@@ -61,14 +61,21 @@ struct OnboardingView: View {
                 HStack {Brand();Spacer();Text("On-device AI").font(.system(size:12))}
                     .padding(.horizontal,52).padding(.top,36).padding(.bottom,20)
                 GeometryReader { geo in
-                    let top = min(72, max(20, (geo.size.height - 760) * 0.12))
+                    let roomy = geo.size.width >= 1400 || geo.size.height >= 900
+                    let maxWidth: CGFloat = switch (store.state.step, roomy) {
+                    case (1, true): min(1380, geo.size.width - 140)
+                    case (2, true): 820
+                    default: columnWidth
+                    }
                     ScrollView {
-                        Group {switch store.state.step {case 0:welcome;case 1:capabilities;case 2:EvilReveal(store:store);default:preparation}}
-                            .frame(maxWidth:columnWidth,alignment:.leading)
-                            .padding(.horizontal,40)
-                            .padding(.top,top)
-                            .padding(.bottom,32)
-                            .frame(width:geo.size.width,alignment:.center)
+                        VStack(spacing:0) {
+                            Spacer(minLength:28)
+                            Group {switch store.state.step {case 0:welcome;case 1:capabilities(roomy);case 2:EvilReveal(store:store,spacious:roomy);default:preparation}}
+                                .frame(maxWidth:maxWidth,alignment:store.state.step == 2 && roomy ? .center : .leading)
+                                .padding(.horizontal,40)
+                            Spacer(minLength:28)
+                        }
+                        .frame(minWidth:geo.size.width,minHeight:geo.size.height)
                     }
                 }
                 HStack {
@@ -95,31 +102,31 @@ struct OnboardingView: View {
         }
     }
     var preparing:[Capability] {Capability.allCases.filter{store.state.selected.contains($0)}}
-    var capabilities: some View {
+    func capabilities(_ roomy:Bool)->some View {
         VStack(alignment:.leading,spacing:0) {
-            VStack(alignment:.leading,spacing:14) {
-                Text("What capabilities do you want to enable?").font(.system(size:32,weight:.medium)).tracking(-1.05)
-                Text("Chat is the default.").font(.system(size:16)).foregroundStyle(.white.opacity(0.72))
+            VStack(alignment:.leading,spacing:roomy ? 18:14) {
+                Text("What capabilities do you want to enable?").font(.system(size:roomy ? 42:32,weight:.medium)).tracking(roomy ? -1.3:-1.05)
+                Text("Chat is the default.").font(.system(size:roomy ? 18:16)).foregroundStyle(.white.opacity(0.72))
             }
-            HStack(alignment:.top,spacing:22) {ForEach(Capability.allCases){capabilityCard($0)}}
-                .padding(.top,48)
-            Text(store.macSpecs.summary).font(.system(size:13)).foregroundStyle(.white.opacity(0.55))
-                .padding(.top,40)
+            HStack(alignment:.top,spacing:roomy ? 36:22) {ForEach(Capability.allCases){capabilityCard($0,roomy:roomy)}}
+                .padding(.top,roomy ? 92:40)
+            Text(store.macSpecs.summary).font(.system(size:roomy ? 15:13)).foregroundStyle(.white.opacity(0.55))
+                .padding(.top,roomy ? 72:32)
             HStack(alignment:.center,spacing:16) {
-                Text("\(store.total,specifier:"%.1f") GB").font(.system(size:15,weight:.medium)).monospacedDigit().foregroundStyle(.white.opacity(0.72))
+                Text("\(store.total,specifier:"%.1f") GB").font(.system(size:roomy ? 17:15,weight:.medium)).monospacedDigit().foregroundStyle(.white.opacity(0.72))
                 Spacer()
                 Button("Continue"){store.next()}.buttonStyle(WelcomeButton())
-            }.padding(.top,36)
+            }.padding(.top,roomy ? 56:28)
         }
     }
-    func capabilityCard(_ capability:Capability)->some View {
+    func capabilityCard(_ capability:Capability,roomy:Bool)->some View {
         let selected=store.state.selected.contains(capability),available=store.available(capability),isChat=capability == .chat
         return Button{store.toggle(capability)}label:{
             HStack(alignment:.center,spacing:12) {
-                CapabilityIcon(capability:capability,size:52).opacity(available ? 1:0.4)
+                CapabilityIcon(capability:capability,size:roomy ? 60:52).opacity(available ? 1:0.4)
                 VStack(alignment:.leading,spacing:7) {
                     HStack(alignment:.center) {
-                        Text(capability.rawValue).font(.system(size:18,weight:.medium)).tracking(-0.3)
+                        Text(capability.rawValue).font(.system(size:roomy ? 20:18,weight:.medium)).tracking(-0.3)
                         Spacer(minLength:4)
                         if isChat {
                             Text("Default").font(.system(size:12,weight:.medium)).foregroundStyle(.white.opacity(0.62))
@@ -138,7 +145,7 @@ struct OnboardingView: View {
                     Text("\(capability.gb,specifier:"%.1f") GB").font(.system(size:12)).foregroundStyle(.white.opacity(0.42)).monospacedDigit()
                 }
             }
-            .padding(.horizontal,18).padding(.vertical,20).frame(maxWidth:.infinity,alignment:.leading).frame(minHeight:132)
+            .padding(.horizontal,roomy ? 22:18).padding(.vertical,roomy ? 26:20).frame(maxWidth:.infinity,alignment:.leading).frame(minHeight:roomy ? 164:132)
             .foregroundStyle(.white.opacity(available ? 1:0.45))
             .background {
                 let shape=RoundedRectangle(cornerRadius:18,style:.continuous)
@@ -201,11 +208,13 @@ struct WelcomeButton:ButtonStyle {
 }
 struct EvilSwitch: View {
     @Binding var isOn: Bool
+    var large = false
+    var showsLabel = true
     @Environment(\.accessibilityReduceMotion) private var reduce
     var body: some View {
         Button { isOn.toggle() } label: {
             HStack(spacing: 12) {
-                Text("Enable Evil Mode").font(.system(size: 16, weight: .medium))
+                if showsLabel { Text("Enable Evil Mode").font(.system(size: large ? 18:16, weight: .medium)) }
                 ZStack {
                     Capsule()
                         .fill(isOn ? Color(hex: 0xC44848) : Color.white.opacity(0.14))
@@ -213,12 +222,12 @@ struct EvilSwitch: View {
                         .strokeBorder(Color.white.opacity(isOn ? 0.16 : 0.22), lineWidth: 1)
                     Circle()
                         .fill(Color.white)
-                        .frame(width: 16, height: 16)
+                        .frame(width: large ? 20:16, height: large ? 20:16)
                         .shadow(color: .black.opacity(0.2), radius: 1, y: 0.5)
                         .frame(maxWidth: .infinity, alignment: isOn ? .trailing : .leading)
-                        .padding(3)
+                        .padding(large ? 3:3)
                 }
-                .frame(width: 40, height: 22)
+                .frame(width: large ? 52:40, height: large ? 28:22)
             }
         }
         .buttonStyle(.plain)
@@ -230,18 +239,37 @@ struct EvilSwitch: View {
 }
 struct EvilReveal:View {
     @ObservedObject var store:AppStore
+    var spacious = false
     var body:some View {
+        Group {
+            if spacious { spaciousBody } else { compactBody }
+        }
+    }
+    var compactBody:some View {
         VStack(alignment:.leading,spacing:20) {
             Text("Evil Mode").font(.system(size:60,weight:.medium)).tracking(-2.2)
             Text("An AI that never says no.").font(.system(size:28,weight:.regular)).tracking(-0.6)
             Text("Zero restrictions, including adult content. It does not account for ethical concerns.")
                 .font(.system(size:17)).foregroundStyle(.white.opacity(0.82)).lineSpacing(4).fixedSize(horizontal:false,vertical:true).frame(maxWidth:460,alignment:.leading)
-            EvilSwitch(isOn:Binding(get:{store.state.defaultMode == .evil},set:{store.state.defaultMode = $0 ? .evil:.safe}))
-                .padding(.top,10)
-            Button(store.revealInChat ? "Done":"Continue"){store.chooseEvil(store.state.defaultMode == .evil)}
-                .buttonStyle(PrimaryButton(coral:true)).padding(.top,4)
+            EvilSwitch(isOn:evilOn).padding(.top,10)
+            continueButton.padding(.top,4)
         }.frame(maxWidth:640,alignment:.leading)
     }
+    var spaciousBody:some View {
+        VStack(spacing:0) {
+            Text("Evil Mode").font(.system(size:84,weight:.medium)).tracking(-2.8)
+            Text("An AI that never says no.").font(.system(size:36,weight:.regular)).tracking(-0.8).padding(.top,36)
+            Text("Zero restrictions, including adult content. It does not account for ethical concerns.")
+                .font(.system(size:20)).foregroundStyle(.white.opacity(0.82)).lineSpacing(6).multilineTextAlignment(.center)
+                .frame(maxWidth:520).padding(.top,28)
+            Text("Enable Evil Mode").font(.system(size:18,weight:.medium)).padding(.top,64)
+            EvilSwitch(isOn:evilOn,large:true,showsLabel:false).padding(.top,18)
+            continueButton.padding(.top,40)
+        }
+        .frame(maxWidth:.infinity)
+    }
+    var evilOn:Binding<Bool> {Binding(get:{store.state.defaultMode == .evil},set:{store.state.defaultMode = $0 ? .evil:.safe})}
+    var continueButton:some View {Button(store.revealInChat ? "Done":"Continue"){store.chooseEvil(store.state.defaultMode == .evil)}.buttonStyle(PrimaryButton(coral:true))}
 }
 struct PreparationRow:View {
     @ObservedObject var store:AppStore;let capability:Capability

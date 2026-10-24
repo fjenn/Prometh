@@ -40,7 +40,6 @@ struct WorkspaceView: View {
             if centered {
                 Spacer(minLength:0)
                 composer
-                suggestions.padding(.top,6)
                 Spacer(minLength:0)
             } else {
                 if let c=store.current,!c.messages.isEmpty {transcript(c)} else {Spacer(minLength:0)}
@@ -68,15 +67,6 @@ struct WorkspaceView: View {
     }
     var modeMenu:some View {
         Menu{Button("Safe Mode"){store.setMode(.safe)};Button("Evil Mode"){store.setMode(.evil)}}label:{HStack(spacing:4){Text(isEvil ? "Evil Mode":"Safe Mode").font(.system(size:13,weight:.medium));Image(systemName:"chevron.down").font(.system(size:9,weight:.semibold))}.foregroundStyle(.primary.opacity(0.72))}.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Only this chat. New chats start in Safe Mode.").accessibilityLabel("Evil Mode for this chat")
-    }
-    var suggestions:some View {
-        VStack(alignment:.leading,spacing:8) {
-            suggestion("Help me shape a personal AI product idea.")
-            suggestion("Create a cinematic photograph of a glass house above the Atlantic.")
-        }.frame(maxWidth:760).padding(.horizontal,46).frame(maxWidth:.infinity)
-    }
-    func suggestion(_ prompt:String)->some View {
-        Button{if store.current==nil{store.newChat()};store.setDraft(prompt)}label:{Text(prompt).font(.system(size:13)).foregroundStyle(.secondary).lineLimit(1).frame(maxWidth:.infinity,alignment:.leading)}.buttonStyle(.plain)
     }
     func transcript(_ c:Conversation)->some View {
         ScrollViewReader{proxy in ScrollView{LazyVStack(alignment:.leading,spacing:30){ForEach(c.messages){m in messageView(m,chat:c)};Color.clear.frame(height:1).id("bottom")}.frame(maxWidth:760).padding(.horizontal,35).padding(.vertical,30).frame(maxWidth:.infinity)}.onChange(of:c.messages.count){_,_ in if store.isRunning(c.id) || store.voice.isOpen {proxy.scrollTo("bottom",anchor:.bottom)}}.onChange(of:c.messages.last?.text){_,_ in if store.isRunning(c.id) || store.voice.isOpen {proxy.scrollTo("bottom",anchor:.bottom)}}.onChange(of:c.id,initial:true){_,_ in proxy.scrollTo("bottom",anchor:.bottom)}}
