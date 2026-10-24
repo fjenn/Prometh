@@ -1,0 +1,65 @@
+PASS: Chat selected by default
+PASS: Initial total
+PASS: Welcome to capability selection
+PASS: All capability total 20.9 GB
+PASS: Chat remains selected
+PASS: Everyday Mac makes Video unavailable
+PASS: Unavailable Video explains why
+PASS: Dedicated Evil reveal
+PASS: Evil choice starts preparation
+PASS: Pause freezes progress
+PASS: Resume advances same job
+PASS: Cancelled preparation cannot finish later
+PASS: Deterministic preparation failure
+PASS: Chat becomes ready before optional work
+PASS: Early entry inherits Evil Mode
+PASS: New conversation uses latest default, unlock persists
+PASS: Switching chat does not move response
+PASS: Response finishes in owning conversation
+PASS: Stop preserves partial output and cancels completion
+PASS: Edit replaces subsequent branch
+PASS: Regenerate replaces reply
+PASS: Rename and search real chats
+PASS: Image creates original artifact
+PASS: Image edit preserves original and creates associated version
+PASS: Video trim is a distinct artifact draft version
+PASS: Media failure repeatable
+PASS: Retry preserves edit source association
+PASS: Media cancellation has no delayed artifact
+PASS: Consent cancel grants nothing
+PASS: Consent connects shared state
+PASS: Connection can expire
+PASS: Reconnect and disconnect
+PASS: Drafts and attachments survive conversation switches
+PASS: Dictation inserts editable sample transcript
+PASS: Unsupported attachment preserves draft
+PASS: Persistence restores drafts and attachments
+PASS: Persistence restores mode, appearance and onboarding
+PASS: Samples are seeded only once
+PASS: Interrupted responses recover as stopped
+PASS: Delete cancels owned work
+PASS: Safe choice works on repeated walkthrough
+PASS: Back navigation preserves selections
+PASS: Low storage permits Chat while optional capability fails
+PASS: Storage recovery retries optional capability
+PASS: Safe and Evil use distinct response style
+PASS: Voice interrupt cancels pending speech
+PASS: Voice mute has visible state
+PASS: Voice end stops audio
+
+48 checks passed.
+sysctlbyname for kern.hv_vmm_present failed with status -1PASS: Bundled image decodes
+PASS: Bundled selected dreamworld decodes
+PASS: Original app icon decodes
+PASS: Image export payload is decodable PNG
+PASS: Bundled video is six seconds
+PASS: Video has real playable video track
+PASS: AVPlayer seeks to requested playhead
+PASS: Actual video playback advances
+PASS: Pause stops playback
+PASS: Bundled voice WAV decodes
+PASS: Real voice playback starts
+PASS: Voice playback advances
+PASS: Voice stop ends playback
+PASS: Video export payload remains decodable
+14 media checks passed.

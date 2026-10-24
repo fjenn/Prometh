@@ -1,0 +1,9 @@
+# Reuse record
+
+Studied the bundled Nativ WelcomeView, ChatView, ChatComposer and ChatArchive from audited commit 722be38266fba784a66288dbead55a9a6105dd6a (v0.4.3). WelcomeView's gate/transitions, ChatView's restrained transcript column and attachment/speech lifecycle, ChatComposer's native NSTextView boundary and marked-input handling, and ChatArchive's versioned persistence/recovery informed the implementation.
+
+No complete Nativ view or runtime component was extracted. Its views reference NativModel, NativServerKit, MCP hosts, media stores and a large chat view model, so the prototype implements focused independent equivalents. The small native editor follows the general marked-text guard and Return-routing pattern, with Shift-Return explicitly added for this PRD. The MIT license is retained conservatively for this derived pattern. There is no inference server, model integration, OAuth library or updater.
+
+All UI, capability drawings, atmospheric orb, application icon and layout are implemented here. The selected onboarding PNG, architectural PNG, six-second H.264 MP4 and voice WAV are supplied fixtures. Image and video edit results deliberately reuse their original pixels/frames with separate artifact IDs, parent IDs, version numbers and trim metadata. Video trimming is an interactive draft, not an actual re-encode. The bold Evil Mode claims are design-concept text, not model evaluation results.
+
+The review revision also studied NativSkill.swift and the composer's Extensions/Tools hooks. Prometh's SkillRecord follows the same small Codable identity/name/instructions/enabled pattern, with its own store, editor and Markdown import. No Nativ extension runtime or execution server was extracted. Provider artwork and repository notices are listed in PROVIDER_ASSETS.md; the application's revised wordmark and typographic dock icon are original native drawing/type treatments.

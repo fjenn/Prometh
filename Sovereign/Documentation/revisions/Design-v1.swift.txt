@@ -1,0 +1,38 @@
+import SwiftUI
+import AppKit
+
+extension Color {
+    init(hex: UInt32) {self.init(.sRGB,red:Double((hex>>16)&255)/255,green:Double((hex>>8)&255)/255,blue:Double(hex&255)/255,opacity:1)}
+    static let sovereignInk=Color(hex:0x292B35)
+    static let sky=Color(hex:0x83CFF0)
+    static let lavender=Color(hex:0xB8ACE4)
+    static let coral=Color(hex:0xF28779)
+    static let butter=Color(hex:0xF5CE65)
+    static let sage=Color(hex:0xA9CDB4)
+}
+extension Capability {var color: Color {switch self {case .chat:.sky;case .voice:.lavender;case .images:.butter;case .video:.coral}}}
+struct PrimaryButton: ButtonStyle {
+    var coral=false
+    func makeBody(configuration: Configuration) -> some View {configuration.label.font(.system(size:14,weight:.semibold)).padding(.horizontal,24).padding(.vertical,14).foregroundStyle(.white).background(coral ? Color(hex:0x88445E):.sovereignInk,in:Capsule()).opacity(configuration.isPressed ? 0.8:1).scaleEffect(configuration.isPressed ? 0.98:1)}
+}
+struct GlassPanel: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) var reduce
+    func body(content: Content)->some View {content.background {if reduce{RoundedRectangle(cornerRadius:28).fill(Color(nsColor:.windowBackgroundColor))}else{RoundedRectangle(cornerRadius:28).fill(.regularMaterial)}}.overlay(RoundedRectangle(cornerRadius:28).stroke(.white.opacity(0.55),lineWidth:1)).shadow(color:.black.opacity(0.06),radius:24,y:12)}
+}
+extension View {func glassPanel()->some View {modifier(GlassPanel())}}
+struct Brand: View {
+    var body: some View {HStack(spacing:10){ZStack{RoundedRectangle(cornerRadius:10).fill(LinearGradient(colors:[.sky,.lavender,.coral.opacity(0.8)],startPoint:.topLeading,endPoint:.bottomTrailing)).frame(width:30,height:30);Image(systemName:"sparkle").font(.system(size:19,weight:.medium)).foregroundStyle(.white)};Text(Product.name).font(.system(size:18,weight:.semibold,design:.rounded)).tracking(-0.4)}}
+}
+struct CapabilityArt: View {
+    let capability: Capability
+    var body: some View {ZStack{Circle().fill(capability.color.opacity(0.20)).frame(width:84,height:84);RoundedRectangle(cornerRadius:18).fill(LinearGradient(colors:[capability.color.opacity(0.55),capability.color],startPoint:.topLeading,endPoint:.bottomTrailing)).frame(width:63,height:57).rotationEffect(.degrees(-9)).offset(x:-3,y:3).shadow(color:capability.color.opacity(0.35),radius:10,y:6);Image(systemName:capability.symbol).font(.system(size:29,weight:.medium)).foregroundStyle(Color.sovereignInk.opacity(0.8)).rotationEffect(.degrees(-9))}.accessibilityHidden(true)}
+}
+struct IconButton: View {
+    let symbol: String;let title: String;var action:()->Void
+    var body: some View {Button(action:action){Image(systemName:symbol).font(.system(size:15)).frame(width:30,height:30).contentShape(Circle())}.buttonStyle(.plain).help(title).accessibilityLabel(title)}
+}
+struct AmbientOrb: View {
+    @Environment(\.accessibilityReduceMotion) var reduce
+    var active=true
+    var body: some View {TimelineView(.animation(minimumInterval:0.08,paused:reduce || !active)){ctx in let t=ctx.date.timeIntervalSinceReferenceDate;ZStack{Circle().fill(Color.sky.opacity(0.35)).blur(radius:26).frame(width:180,height:180);ForEach(0..<5){i in Ellipse().fill(LinearGradient(colors:[.sky.opacity(0.8),.lavender.opacity(0.9),.coral.opacity(0.6)],startPoint:.topLeading,endPoint:.bottomTrailing)).frame(width:105+CGFloat(i)*7,height:145).rotationEffect(.degrees(Double(i)*36+(reduce ? 0:sin(t*0.7)*14))).scaleEffect(reduce ? 1:1+sin(t*1.4+Double(i))*0.045).opacity(0.62)};Image(systemName:"sparkle").font(.system(size:36,weight:.ultraLight)).foregroundStyle(.white)}.frame(width:230,height:230)}}
+}
