@@ -30,11 +30,11 @@ enum Provider: String, CaseIterable, Codable, Identifiable {
 enum Connection: String, Codable { case disconnected, connected, expired }
 struct Artifact: Identifiable, Codable, Equatable {
     var id = UUID(); var kind: String; var filename: String; var prompt: String
-    var parentID: UUID? = nil; var version = 1; var trimStart: Double = 0; var trimEnd: Double = 6
+    var parentID: UUID? = nil; var version = 1; var trimStart: Double = 0; var trimEnd: Double = 6; var duration: Double? = nil; var modelID: String? = nil
 }
 struct Attachment: Identifiable, Codable, Equatable { var id = UUID(); var filename: String; var storedName: String; var bundled = false }
 struct Message: Identifiable, Codable, Equatable {
-    var id = UUID(); var role: String; var text: String; var status = "complete"; var attachments: [Attachment] = []; var artifact: Artifact? = nil; var sources = false; var jobKind: String? = nil; var sourceArtifact: Artifact? = nil; var trimRange: [Double]? = nil; var appliedSkillNames: [String]? = nil
+    var id = UUID(); var role: String; var text: String; var status = "complete"; var attachments: [Attachment] = []; var artifact: Artifact? = nil; var sources = false; var jobKind: String? = nil; var sourceArtifact: Artifact? = nil; var trimRange: [Double]? = nil; var appliedSkillNames: [String]? = nil; var sourceLinks: [SourceLink]? = nil
 }
 struct Conversation: Identifiable, Codable {
     var id = UUID(); var title = "New conversation"; var mode: BehaviorMode = .safe
@@ -49,13 +49,17 @@ struct SkillRecord: Identifiable, Codable, Equatable {
 struct MacSpecs {
     let memoryGB: Int
     let freeStorageGB: Int
+    let chip: String
     static func read() -> MacSpecs {
         let memory = Int((Double(ProcessInfo.processInfo.physicalMemory)/1_073_741_824).rounded())
-        let values = try? FileManager.default.attributesOfFileSystem(forPath:NSHomeDirectory())
+        let cache = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent(Product.supportName)
+        try? FileManager.default.createDirectory(at:cache,withIntermediateDirectories:true)
+        let values = try? FileManager.default.attributesOfFileSystem(forPath:cache.path)
         let free = (values?[.systemFreeSize] as? NSNumber)?.doubleValue ?? 0
-        return MacSpecs(memoryGB:memory,freeStorageGB:Int(free/1_000_000_000))
+        var size=0;sysctlbyname("machdep.cpu.brand_string",nil,&size,nil,0);var bytes=[CChar](repeating:0,count:max(1,size));sysctlbyname("machdep.cpu.brand_string",&bytes,&size,nil,0)
+        return MacSpecs(memoryGB:memory,freeStorageGB:Int(free/1_000_000_000),chip:String(cString:bytes))
     }
-    var summary: String { "Apple silicon · \(memoryGB) GB memory · \(freeStorageGB) GB available" }
+    var summary: String { "\(chip) · \(memoryGB) GB memory · \(freeStorageGB) GB available" }
 }
 struct Snapshot: Codable {
     var version = 1; var onboardingComplete = false; var step = 0
@@ -65,6 +69,9 @@ struct Snapshot: Codable {
     var chats: [Conversation] = []; var selectedChatID: UUID?; var seeded = false
     var skills: [SkillRecord]? = nil
     var fileReadingEnabled: Bool? = nil
+    var runtimeVersion: Int? = nil
+    var connectorBrokerURL: String? = nil
+    var installID: String? = nil
 }
 struct Persistence {
     let directory: URL

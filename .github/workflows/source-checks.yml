@@ -1,0 +1,24 @@
+name: Source distribution checks
+on:
+  push:
+    paths: ['Prometh/**', '.gitignore', '.gitattributes', '.github/workflows/source-checks.yml']
+  pull_request:
+    paths: ['Prometh/**', '.gitignore', '.gitattributes', '.github/workflows/source-checks.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify distribution boundary and fault handling
+        run: |
+          python3 Prometh/Scripts/check-release-inputs.py
+          python3 Prometh/Scripts/test-provision-runtime.py
+          python3 Prometh/Scripts/test-model-cache.py
+          python3 Prometh/Scripts/provision-runtime.py --dry-run > /tmp/runtime-plan.json
+          python3 -m py_compile Prometh/Scripts/*.py
+          git diff --check
+# Standalone macOS build/inference is a separate Xcode 26+ local validation.
+# This lightweight source job deliberately downloads no runtimes or models.

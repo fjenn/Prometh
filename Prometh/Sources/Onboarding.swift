@@ -95,7 +95,7 @@ struct OnboardingView: View {
                 Text("Fully private.")
                 Text("No accounts.")
                 Text("Full control.")
-                Text("No restrictions.")
+                Text("Your choice of models.")
             }.font(.system(size:36,weight:.regular)).tracking(-0.9).foregroundStyle(.white.opacity(0.90))
             Text("Runs on your Mac.").font(.system(size:15)).foregroundStyle(.white.opacity(0.7)).padding(.top,4)
             Button("Get started"){store.next()}.buttonStyle(WelcomeButton()).padding(.top,12)
@@ -142,7 +142,7 @@ struct OnboardingView: View {
                     Text(available ? capability.phrase:store.limitLabel(capability))
                         .font(.system(size:13)).foregroundStyle(.white.opacity(0.62))
                         .lineLimit(2).frame(maxWidth:.infinity,alignment:.leading)
-                    Text("\(capability.gb,specifier:"%.1f") GB").font(.system(size:12)).foregroundStyle(.white.opacity(0.42)).monospacedDigit()
+                    Text("\(store.sizeLabel(capability))").font(.system(size:12)).foregroundStyle(.white.opacity(0.42)).monospacedDigit()
                 }
             }
             .padding(.horizontal,roomy ? 22:18).padding(.vertical,roomy ? 26:20).frame(maxWidth:.infinity,alignment:.leading).frame(minHeight:roomy ? 164:132)
@@ -160,7 +160,7 @@ struct OnboardingView: View {
             .animation(reduce ? nil:.easeInOut(duration:0.28),value:selected)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(capability.rawValue), \(isChat ? "default":selected ? "selected":"not selected"), \(capability.gb) GB. \(available ? capability.phrase:store.fitNote(capability))")
+        .accessibilityLabel("\(capability.rawValue), \(isChat ? "default":selected ? "selected":"not selected"), \(store.sizeLabel(capability)). \(available ? capability.phrase:store.fitNote(capability))")
     }
     var preparation: some View {
         VStack(alignment:.leading,spacing:27) {
@@ -248,8 +248,8 @@ struct EvilReveal:View {
     var compactBody:some View {
         VStack(alignment:.leading,spacing:20) {
             Text("Evil Mode").font(.system(size:60,weight:.medium)).tracking(-2.2)
-            Text("An AI that never says no.").font(.system(size:28,weight:.regular)).tracking(-0.6)
-            Text("Zero restrictions, including adult content. It does not account for ethical concerns.")
+            Text("Explore with fewer refusals.").font(.system(size:28,weight:.regular)).tracking(-0.6)
+            Text("An optional locally running alternative for this conversation. Behavior depends on the model; zero refusals are not guaranteed.")
                 .font(.system(size:17)).foregroundStyle(.white.opacity(0.82)).lineSpacing(4).fixedSize(horizontal:false,vertical:true).frame(maxWidth:460,alignment:.leading)
             EvilSwitch(isOn:evilOn).padding(.top,10)
             continueButton.padding(.top,4)
@@ -258,8 +258,8 @@ struct EvilReveal:View {
     var spaciousBody:some View {
         VStack(spacing:0) {
             Text("Evil Mode").font(.system(size:84,weight:.medium)).tracking(-2.8)
-            Text("An AI that never says no.").font(.system(size:36,weight:.regular)).tracking(-0.8).padding(.top,36)
-            Text("Zero restrictions, including adult content. It does not account for ethical concerns.")
+            Text("Explore with fewer refusals.").font(.system(size:36,weight:.regular)).tracking(-0.8).padding(.top,36)
+            Text("An optional locally running alternative for this conversation. Behavior depends on the model; zero refusals are not guaranteed.")
                 .font(.system(size:20)).foregroundStyle(.white.opacity(0.82)).lineSpacing(6).multilineTextAlignment(.center)
                 .frame(maxWidth:520).padding(.top,28)
             Text("Enable Evil Mode").font(.system(size:18,weight:.medium)).padding(.top,64)
@@ -314,13 +314,12 @@ struct PreparationRow:View {
     }
     var barColor:Color {switch capability{case .chat:Color(hex:0x3AA0D8);case .voice:Color(hex:0x6E5CC0);case .images:Color(hex:0xD7A63A);case .video:Color(hex:0xE36B5C)}}
     func detail(_ p:Preparation)->String {
-        if p.status == .failed{return store.state.hardware == .storage ? "Not enough space. Select fewer capabilities.":"Preparation interrupted. Try again."}
+        if p.status == .failed{return store.modelDetails[capability.rawValue] ?? "Preparation interrupted. Try again."}
         if p.status == .ready{return capability.phrase}
         if p.status == .paused || p.status == .cancelled{return p.status.rawValue}
         if p.status == .queued{return "Waiting"}
-        let duration:Double=switch capability{case .chat:3;case .voice:8;case .images:12;case .video:16}
-        let word=switch p.status{case .preparing:"Getting ready";case .checking:"Almost ready";default:"Downloading"}
-        return "\(word) · \(max(1,Int(ceil((1-p.progress)*duration))))s"
+        if !store.isPreview {return store.modelDetails[capability.rawValue] ?? p.status.rawValue}
+        return p.status.rawValue
     }
 }
 struct ConnectorsList:View {
@@ -333,7 +332,7 @@ struct ConnectorsList:View {
                     ProviderLogo(provider:provider,size:25)
                     VStack(alignment:.leading,spacing:4) {
                         Text(provider.rawValue).font(.system(size:13,weight:.medium))
-                        Text(status == .connected ? "you@example.com":status == .expired ? "Connection expired":"Not connected")
+                        Text(status == .connected ? "Authorized connection":status == .expired ? "Connection expired":"Not connected")
                             .font(.system(size:10)).foregroundStyle(status == .expired ? .orange:.secondary)
                     }
                     Spacer()

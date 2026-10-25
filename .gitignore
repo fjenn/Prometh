@@ -2,3 +2,29 @@
 .build/
 dist/
 Local_AI_UI_Handoff/
+
+# Local editor/agent state and scratch files (never part of a release).
+.cursor/
+/Prometh/work/
+/temp.txt
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+*.log
+
+# Recreated by Prometh/Scripts/setup-runtime.sh from checksum-pinned sources.
+/vendor/
+/Prometh/Runtime/FastVideo/
+/Prometh/.runtime-cache/
+
+.projects/cache
+.projects/vault
+.projects/state.test.json
+.projects/state.local.test.json
+.env
+.env.*
+!.env.example
+
+# Local audit evidence can include absolute user-data paths; publish sanitized results instead.
+/Prometh/Documentation/QA-2026-10-24/

@@ -4,7 +4,7 @@ struct SettingsView:View {
     @ObservedObject var store:AppStore
     @State var resetConfirmation=false
     @State var samplesConfirmation=false
-    let tabs=["Appearance","Capabilities","Privacy & data","Preview"]
+    var tabs:[String] {store.isPreview ? ["Appearance","Capabilities","Privacy & data","Preview"]:["Appearance","Capabilities","Privacy & data"]}
     var body:some View {
         HStack(spacing:0) {
             VStack(alignment:.leading,spacing:7) {
@@ -53,21 +53,23 @@ struct SettingsView:View {
                 VStack(alignment:.leading,spacing:8){
                     if store.state.selected.contains(c){
                         PreparationRow(store:store,capability:c)
-                        HStack{Text("\(c.gb,specifier:"%.1f") GB").font(.caption).foregroundStyle(.secondary);Spacer();if c != .chat{Button("Remove"){store.toggle(c)}}}
+                        HStack{Text("\(store.sizeLabel(c))").font(.caption).foregroundStyle(.secondary);Spacer();if c != .chat{Button("Remove"){store.toggle(c)}}}
                     }else{
-                        HStack(spacing:12){Text(c.rawValue).font(.system(size:15,weight:.medium));Spacer();Text("\(c.gb,specifier:"%.1f") GB").font(.caption).foregroundStyle(.secondary);Button("Add"){store.toggle(c);if store.state.selected.contains(c){store.resumePreparation(c)}}}
+                        HStack(spacing:12){Text(c.rawValue).font(.system(size:15,weight:.medium));Spacer();Text("\(store.sizeLabel(c))").font(.caption).foregroundStyle(.secondary);Button("Add"){store.toggle(c);if store.state.selected.contains(c){store.resumePreparation(c)}}}
                         Text(store.available(c) ? c.detail:store.fitNote(c)).font(.caption).foregroundStyle(.secondary).opacity(store.available(c) ? 1:0.7)
                     }
                 }.padding(17).background(.primary.opacity(0.025),in:RoundedRectangle(cornerRadius:14))
             }
+            VStack(alignment:.leading,spacing:10){HStack{Text("Evil chat · optional").font(.headline);Spacer();Button("Download / verify"){store.prepareEvil()}};Text(store.modelDetails["Evil"] ?? "Qwen3.5 heretic · Q4_K_M · 5.63 GB weights · text input").font(.caption).foregroundStyle(.secondary)}.padding(17).background(.primary.opacity(0.025),in:RoundedRectangle(cornerRadius:14))
+            Text("Downloads show selected weight sizes, not working memory. Heavy chat, speech, image and video jobs run one at a time; the previous engine unloads before another family runs. Keep 12 GiB free for macOS, plus selected downloads.").font(.caption).foregroundStyle(.secondary)
             if store.state.hardware == .storage {Button("Review capability choices"){store.settingsOpen=false;store.state.step=1;store.state.onboardingComplete=false}}
         }
     }
     var privacy:some View {
-        VStack(alignment:.leading,spacing:18){Text("Your data stays on this Mac.").font(.headline);Text("No product account. Chats, skills and preferences are stored in this app's own folder.").foregroundStyle(.secondary).lineSpacing(5);Button("Export current conversation…"){store.exportChat()};Button("Show local data folder"){NSWorkspace.shared.open(store.persistence.directory)};Divider();Text("About this prototype").font(.headline);Text("AI responses, model preparation, compatibility scenarios and connectors are simulated. Hardware memory and storage are read from your Mac; model fit is a preview, not a benchmark. Images and video edits use bundled files. Evil Mode's claim language is a concept, not verified model performance.").font(.system(size:12)).lineSpacing(5).foregroundStyle(.secondary);Button("Clear prototype data…",role:.destructive){resetConfirmation=true}}
+        VStack(alignment:.leading,spacing:18){Text("Your data stays on this Mac.").font(.headline);Text("No product account. Chats, skills and preferences are stored in this app's own folder.").foregroundStyle(.secondary).lineSpacing(5);Button("Export current conversation…"){store.exportChat()};Button("Show local data folder"){NSWorkspace.shared.open(store.persistence.directory)};Divider();Text("About local inference").font(.headline);Text("Models run in Prometh’s own packaged runtimes. Downloads come directly from Hugging Face at pinned revisions with verified checksums. Web search and connected apps send requests only when enabled. Working memory varies by task; 16 GB hardware certification is pending. Video generation is silent text-to-video; editing currently supports real trimming.").font(.system(size:12)).lineSpacing(5).foregroundStyle(.secondary);Button("Clear local data…",role:.destructive){resetConfirmation=true}}
     }
     var preview:some View {
-        VStack(alignment:.leading,spacing:17){Button("Restart onboarding"){store.restartOnboarding()};Picker("Hardware scenario",selection:Binding(get:{store.state.hardware},set:{store.setHardware($0)})){ForEach(Hardware.allCases,id:\.self){Text($0.rawValue)}};Text("Actual Mac: "+store.macSpecs.summary).font(.caption).foregroundStyle(.secondary);Text("Scenarios demonstrate availability. They do not measure model requirements.").font(.caption).foregroundStyle(.secondary);Divider();Toggle("Fail capability preparation",isOn:Binding(get:{store.failPreparation},set:{store.setPreparationFailure($0)}));Toggle("Fail next chat or media request",isOn:$store.failNextResponse);Toggle("Voice permission denied scenario",isOn:$store.voice.denied);Button("Show expired Gmail connector"){store.expireConnection();store.openCustomize("Plugins")};Button("Restore sample conversations…"){samplesConfirmation=true};Button("Clear prototype data…",role:.destructive){resetConfirmation=true}}
+        VStack(alignment:.leading,spacing:17){Button("Restart onboarding"){store.restartOnboarding()};Picker("Hardware scenario",selection:Binding(get:{store.state.hardware},set:{store.setHardware($0)})){ForEach(Hardware.allCases,id:\.self){Text($0.rawValue)}};Text("Actual Mac: "+store.macSpecs.summary).font(.caption).foregroundStyle(.secondary);Text("Scenarios demonstrate availability. They do not measure model requirements.").font(.caption).foregroundStyle(.secondary);Divider();Toggle("Fail capability preparation",isOn:Binding(get:{store.failPreparation},set:{store.setPreparationFailure($0)}));Toggle("Fail next chat or media request",isOn:$store.failNextResponse);Toggle("Voice permission denied scenario",isOn:$store.voice.denied);Button("Show expired Gmail connector"){store.expireConnection();store.openCustomize("Plugins")};Button("Restore sample conversations…"){samplesConfirmation=true};Button("Clear local data…",role:.destructive){resetConfirmation=true}}
     }
 }
 struct CustomizeView:View {
@@ -98,7 +100,8 @@ struct PluginsPage:View {
         VStack(alignment:.leading,spacing:18) {
             Text("Apps your AI can use.").foregroundStyle(.secondary)
             ConnectorsList(store:store)
-            Text("Connections use a fictional account. No password is requested.").font(.system(size:11)).foregroundStyle(.secondary)
+            TextField("Connection broker HTTPS address",text:Binding(get:{store.state.connectorBrokerURL ?? ""},set:{store.state.connectorBrokerURL=$0})).textFieldStyle(.roundedBorder)
+            Text("Optional. A Prometh broker keeps the service key off this Mac app and opens real authorization in your browser. Local AI works without a connection.").font(.system(size:11)).foregroundStyle(.secondary)
         }
     }
 }
@@ -110,7 +113,7 @@ struct ToolsPage:View {
             toolRow("Web search",detail:"Find information and include sources in replies.",enabled:$store.state.webSearch)
             Divider()
             toolRow("Read attachments",detail:"Work with images, documents, audio and video you attach.",enabled:Binding(get:{store.state.fileReadingEnabled != false},set:{store.state.fileReadingEnabled=$0}))
-            Text("Search returns local example sources. Only files you choose are read.").font(.system(size:11)).foregroundStyle(.secondary)
+            Text("Web search currently uses Wikipedia. Results are fetched online only when enabled; sources link to retrieved pages. Only files you choose are read.").font(.system(size:11)).foregroundStyle(.secondary)
         }
     }
     func toolRow(_ name:String,detail:String,enabled:Binding<Bool>)->some View {
@@ -131,7 +134,7 @@ struct SkillsPage:View {
             ForEach(store.skills){skill in
                 VStack(alignment:.leading,spacing:13){HStack{Text(skill.name).font(.system(size:15,weight:.medium));Spacer();Toggle(skill.name,isOn:Binding(get:{store.skills.first{$0.id==skill.id}?.isEnabled ?? false},set:{store.setSkillEnabled(skill.id,$0)})).labelsHidden().toggleStyle(.switch).accessibilityLabel("Enable "+skill.name)};Text(skill.instructions).font(.system(size:12)).lineSpacing(4).foregroundStyle(.secondary).lineLimit(3);HStack{Button("Edit"){editingSkill=skill};Spacer();Button("Delete",role:.destructive){deletingSkill=skill.id}}.buttonStyle(.borderless).font(.system(size:12))}.padding(18).background(.primary.opacity(0.025),in:RoundedRectangle(cornerRadius:14))
             }
-            Text("Enabled skills apply to new replies. This preview demonstrates concise and bullet-point styles; instructions are saved for future model integration.").font(.system(size:11)).foregroundStyle(.secondary).lineSpacing(4)
+            Text("Enabled skills apply to new replies. Concise and bullet-point styles are included with the instructions sent to the local model.").font(.system(size:11)).foregroundStyle(.secondary).lineSpacing(4)
         }
         .sheet(item:$editingSkill){skill in SkillEditor(skill:skill){store.saveSkill($0);editingSkill=nil}}
         .confirmationDialog("Delete this skill?",isPresented:Binding(get:{deletingSkill != nil},set:{if !$0{deletingSkill=nil}})){Button("Delete skill",role:.destructive){if let id=deletingSkill{store.deleteSkill(id)};deletingSkill=nil};Button("Cancel",role:.cancel){deletingSkill=nil}}
@@ -149,6 +152,6 @@ struct ConsentView:View {
     @ObservedObject var store:AppStore
     let provider:Provider
     var body:some View {
-        VStack(alignment:.leading,spacing:22){HStack{ProviderLogo(provider:provider,size:35);Spacer();Brand()};Text("Connect \(provider.rawValue)").font(.system(size:27,weight:.medium)).tracking(-0.7);Text("Choose what your AI can access.").foregroundStyle(.secondary);VStack(alignment:.leading,spacing:5){Text("Alex Example").font(.headline);Text("you@example.com").foregroundStyle(.secondary)}.padding(16).frame(maxWidth:.infinity,alignment:.leading).background(.primary.opacity(0.035),in:RoundedRectangle(cornerRadius:13));Text("Allow \(Product.name) to:").font(.headline);Text(provider.access).font(.system(size:13));Text("Local consent preview. This is a fictional account; no password or real authorization is requested.").font(.system(size:11)).foregroundStyle(.secondary).lineSpacing(4);HStack{Button("Cancel"){store.consent=nil}.keyboardShortcut(.cancelAction);Spacer();Button("Connect"){store.connect(provider)}.buttonStyle(PrimaryButton())}}.padding(32).frame(width:480)
+        VStack(alignment:.leading,spacing:22){HStack{ProviderLogo(provider:provider,size:35);Spacer();Brand()};Text("Connect \(provider.rawValue)").font(.system(size:27,weight:.medium));Text("Your browser will open a real authorization page. Connected app requests use the optional cloud connection service.").foregroundStyle(.secondary);Text(provider.access).font(.system(size:13));Text("Local AI does not need an account. Connections require a configured Prometh broker; its project secret stays on the broker.").font(.caption).foregroundStyle(.secondary);HStack{Button("Cancel"){store.consent=nil};Spacer();Button("Continue in browser"){store.connect(provider)}.buttonStyle(PrimaryButton())}}.padding(32).frame(width:480)
     }
 }

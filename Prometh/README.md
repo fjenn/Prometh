@@ -1,21 +1,58 @@
-# Prometh — native interactive prototype
+# Prometh
 
-Open `dist/Prometh.app`. Requires Apple Silicon and macOS 26 or newer. No dependencies, accounts, server, model downloads, credentials or microphone permissions are needed.
+A native local AI workspace for Apple Silicon, macOS 26 or newer. Safe and Evil
+chat, Whisper transcription, English Pocket speech, FLUX.2 Klein image generation
+and image edits, and silent FastMetal video generation use owned bundled engines.
+Video editing currently means trim/export. Z-Image is disabled. Models download
+separately into `~/Library/Application Support/PromethPrototype/Models`; the app
+verifies the pinned files and reuses valid downloads. See the measured capabilities
+and remaining validation in [the integration notes](Documentation/INTEGRATION.md)
+and [independent review](Documentation/QA-2026-10-24/REVIEW.md).
 
-Build with `./build.sh` using the installed Xcode tools; run checks with `./test.sh`. The compiler flag `-disable-sandbox` avoids the compiler's nested macro-process sandbox, which cannot start inside this workspace sandbox. The application uses ordinary native APIs and does not alter system security settings. The build is locally ad-hoc signed.
+## Build and run
 
-The menu bar's **Preview → Restart onboarding** returns to welcome while retaining conversations. **Preview → Preview controls** offers hardware scenarios, deliberate failures, expired Gmail, restore samples and a confirmed reset. Use **Settings → Appearance** for Light, Dark or System. The initial review preference is Light.
+Install Xcode 26 or newer (including command-line tools), then from `Prometh/`:
 
-Choose capabilities, see the dedicated Evil Mode reveal, and prepare. Chat becomes ready first; optional capabilities can finish later. Add a capability from Settings if an image/video/voice action needs it. Four providers offer fictional local consent with no OAuth. Conversations have independent modes and drafts; new chats start in Safe Mode. Toggle Evil Mode in the composer for that chat. Return sends, Shift-Return inserts a line. Conversation menus provide rename, export and delete. Assistant controls provide copy, regenerate/retry and sample read-aloud.
+```sh
+./build.sh --setup
+open dist/Prometh.app
+./test.sh
+```
 
-Media cards open full previews and native save panels. Edit image/video creates an associated new version; the original remains in history. Video preview provides native playback plus a labeled playhead, mute and trim in/out controls in Edit. Trim ranges are drafts; all edited artifacts reuse the source fixture rather than transforming/re-encoding it. Voice plays the supplied WAV through AVPlayer. Dictation inserts a sample without recording ambient sound.
+The first build requires internet and several GB of free space for standalone
+Python, exact wheel dependencies, source archives and llama.cpp. It does not use
+Homebrew, an installed Nativ app, a global pip environment, or downloaded models.
+Xcode's bundled Python bootstraps the owned Python 3.12.13 runtime. Source archives
+and wheels are pinned and checksum verified. The finished app includes its
+runtimes, is locally ad-hoc signed, and requires no developer tools. This is not a
+Developer ID signed/notarized public installer.
 
-All durable records live in `~/Library/Application Support/PromethPrototype/state-v1.json`, with copied user-selected attachments in `Attachments/`. Resource lookup uses the built app's `Contents/Resources`; the handoff and current directory are never runtime dependencies. No updater is installed. Nativ and its data remain independent.
+`./build.sh` rebuilds using verified prepared engines. Missing or mismatched
+chat/media/llama/video components fail the build before producing an app.
+`Scripts/setup-runtime.sh --dry-run` prints every pin without downloading.
+For an isolated build or to reuse verified existing Prometh runtimes, see
+[distribution instructions](Distribution/README.md). Runtime caches, app bundles,
+model weights and local work logs are excluded from Git.
 
-`Sources/Domain.swift` centralizes product naming and persisted records. `Simulation.swift` contains replaceable deterministic timing, response and voice adapters; `AppStore.swift` owns presentation state, preparation and conversation tasks. SwiftUI views and small AppKit bridges handle presentation, text editing, panels and native AVPlayerView. No external package is required.
+## Use and privacy
 
-The complete original brief, aesthetic references, Nativ excerpts and asset provenance remain alongside this project in `../Local_AI_UI_Handoff`. The two cliff-house fixtures were recovered from the supplied original handoff ZIP because the initially copied directory lacked them. Only the selected dreamworld and demonstration fixtures are bundled; third-party aesthetic imagery is documentation only.
+Choose capabilities during onboarding or in Settings. New chats start in Safe
+mode; each conversation keeps its own mode and draft. Return sends; Shift-Return
+adds a line. Media edits create a new version and preserve the original. Skills
+can be imported/edited and enabled for new replies. Local chats need no account.
 
-See `Documentation/REUSE.md` and `Documentation/VERIFICATION.md` for reuse and checks.
+Chats and settings live in
+`~/Library/Application Support/PromethPrototype/state-v1.json`; selected attachments
+are copied into `Attachments/`. Clear local data leaves downloaded models in
+place. Nativ and its data remain independent. No updater is installed.
 
-The latest review revision is documented in `Documentation/REVISION.md`. Extensions contains Connectors, Tools and Skills. Create or import a Markdown/text skill, edit its instructions, and enable it for new replies. The simulation demonstrates concise and bullet-point styles. Tools provides Web search and Read attachments switches.
+Connected Gmail/Drive/Outlook/GitHub require a separately operated Composio broker
+and authorized account. They remain disconnected without one; no project secret
+belongs in the desktop app. The current search tool uses Wikipedia search.
+Live connector OAuth/execution has not been certified on this installation.
+
+The automated state/media checks include simulation and bundled fixtures; they
+do not certify every real engine, microphone journey, 16 GB machine or offline
+cold launch. See the dated evidence above. Software/model licenses and the
+FFmpeg binary redistribution requirement are in
+[Third-party notices](ThirdParty/NOTICES.md).

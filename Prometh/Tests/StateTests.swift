@@ -9,6 +9,91 @@ import AVFoundation
         var assertions=0
         func check(_ value: @autoclosure ()->Bool,_ title:String){assertions += 1;if !value(){print("FAIL: \(title)");exit(1)};print("PASS: \(title)")}
         func wait(_ ms:Int) async {try? await Task.sleep(for:.milliseconds(ms))}
+        // Regression: explicit media intent must be distinguished from ordinary chat.
+        let realRouting=AppStore(directory:directory.appendingPathComponent("routing"))
+        for text in ["What is photosynthesis?", "Compare a paperclip and a staple.", "What is an image model?", "Explain video compression in one sentence.", "Write an essay about image generation.", "Do not create an image.", "Can you explain how to create a video?", "Show me the video settings.", "Create a video script about travel.", "Generate an image prompt for a fox.", "Draw up a plan for tomorrow."] {
+            check(realRouting.mediaKind(text)==nil,"Real routing keeps ordinary request in chat: \(text)")
+        }
+        for (text,kind) in [("Create an image of a red mug","image"),("Can you create a video of the coast?","video"),("Please draw a fox","image"),("Show me an image of a glass house","image"),("/image a fox","image"),("/video a fox running","video")] {
+            check(realRouting.mediaKind(text)==kind,"Real routing accepts explicit creation: \(text)")
+        }
+        let mediaRoot=URL(fileURLWithPath:FileManager.default.currentDirectoryPath).appendingPathComponent("dist/Prometh.app/Contents/Resources")
+        let generated=Artifact(kind:"image",filename:mediaRoot.appendingPathComponent("cliff-house-demo.png").path,prompt:"A glass house")
+        let visualChat=Conversation(messages:[Message(role:"assistant",text:"Here is your image.",artifact:generated),Message(role:"user",text:"What is in it?")])
+        let visualContext=try await realRouting.context(for:visualChat,skills:[])
+        let contextJSON=String(decoding:try JSONEncoder().encode(visualContext),as:UTF8.self)
+        check(contextJSON.contains("image_url"),"Generated image is included in real follow-up vision context")
+        check(realRouting.imageEditSource("Edit this image to make it warmer",in:visualChat)?.id==generated.id,"Explicit conversational image edit retains generated source")
+        check(realRouting.imageEditSource("What does this image show?",in:visualChat)==nil,"An image question never becomes an edit")
+        let clip=Artifact(kind:"video",filename:mediaRoot.appendingPathComponent("cliff-house-demo.mp4").path,prompt:"Fixture clip")
+        let shortClip=try await realRouting.trimVideo(clip,start:0.5,end:1.85,prompt:"Trim the clip")
+        let importedClip=try await realRouting.generatedArtifact(kind:"video",result:["result":shortClip.filename,"duration":6.0],prompt:"A generated clip",parent:nil)
+        check(abs((importedClip.duration ?? 0)-1.35)<0.08 && importedClip.trimEnd==importedClip.duration,"Generated clip reads actual duration rather than worker fallback")
+        let defaultTrim=try await realRouting.trimVideo(importedClip,start:importedClip.trimStart,end:importedClip.trimEnd,prompt:"Trim the clip")
+        check(abs((defaultTrim.duration ?? 0)-(importedClip.duration ?? 0))<0.08,"Default trim of actual generated duration exports successfully")
+        let installRoot=directory.appendingPathComponent("installed-relaunch")
+        let tinyFile=ModelArtifact(path:"model.bin",size:4,sha256:nil,oid:nil)
+        let tinySafe=LocalModel(id:"safe",capability:"Chat",repo:"test/safe",revision:"revision-one",license:nil,enabled:true,workingMemoryGB:1,files:[tinyFile])
+        let tinyImage=LocalModel(id:"image",capability:"Images",repo:"test/image",revision:"revision-two",license:nil,enabled:true,workingMemoryGB:1,files:[tinyFile])
+        let tinyEvil=LocalModel(id:"evil",capability:"Chat",repo:"test/evil",revision:"revision-three",license:nil,enabled:true,workingMemoryGB:1,files:[tinyFile])
+        let tinyRuntime=LocalRuntime(root:installRoot,catalog:ModelCatalog(models:[tinySafe,tinyImage,tinyEvil]))
+        for model in [tinySafe,tinyImage] {
+            let folder=model.directory(in:tinyRuntime.modelRoot);try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
+            try Data([1,2,3,4]).write(to:folder.appendingPathComponent("model.bin"))
+            let files=try JSONSerialization.jsonObject(with:JSONEncoder().encode(model.files))
+            try JSONSerialization.data(withJSONObject:["revision":model.revision,"files":files]).write(to:folder.appendingPathComponent("verified.json"))
+        }
+        var installed=Snapshot();installed.runtimeVersion=1;installed.seeded=true;installed.selected=[.chat,.images];installed.onboardingComplete=true;installed.preparations=["Chat":Preparation(progress:1,status:.ready),"Images":Preparation(progress:1,status:.ready)]
+        try Persistence(directory:installRoot).save(installed)
+        let reopened=AppStore(directory:installRoot,runtime:tinyRuntime)
+        check(reopened.chatReady && reopened.state.preparations["Images"]?.status == .ready,"Real relaunch preserves locally verified ready capabilities")
+        check(reopened.prepTasks.isEmpty,"Verified relaunch does not redownload models")
+        reopened.state.evilEnabled=true
+        check(abs(reopened.total-12.0/1_000_000_000)<0.0000000001,"Selected download total includes enabled Evil weights")
+        let mutatedImage=tinyImage.directory(in:tinyRuntime.modelRoot).appendingPathComponent("model.bin")
+        try Data([4,3,2,1]).write(to:mutatedImage)
+        try FileManager.default.setAttributes([.modificationDate:Date().addingTimeInterval(2)],ofItemAtPath:mutatedImage.path)
+        check(!tinyRuntime.installedModelVerified(tinyImage),"Same-size modified model invalidates its prior verification receipt")
+        try Persistence(directory:installRoot).save(installed)
+        let changedFiles=AppStore(directory:installRoot,runtime:tinyRuntime)
+        check(changedFiles.chatReady && changedFiles.state.preparations["Images"]?.status == .paused,"Relaunch revalidates optional files while preserving intact Chat")
+        try FileManager.default.removeItem(at:tinySafe.directory(in:tinyRuntime.modelRoot).appendingPathComponent("model.bin"))
+        let interruptedInstall=AppStore(directory:installRoot,runtime:tinyRuntime)
+        check(!interruptedInstall.chatReady && interruptedInstall.prepTasks[.chat] != nil,"Missing mandatory artifact automatically recovers after relaunch")
+        interruptedInstall.pausePreparation(.chat)
+        interruptedInstall.state.preparations["Images"]=Preparation(progress:0.4,status:.paused)
+        interruptedInstall.resumePreparation(.images)
+        check(interruptedInstall.prepTasks[.chat] != nil && interruptedInstall.prepTasks[.images] != nil,"Optional preparation automatically starts its mandatory dependency")
+        interruptedInstall.pausePreparation(.chat);interruptedInstall.pausePreparation(.images)
+        let dependency=AppStore(directory:directory.appendingPathComponent("dependency-pause"),runtime:tinyRuntime)
+        dependency.state.selected.insert(.images);dependency.state.preparations["Chat"]=Preparation(progress:0.4,status:.preparing)
+        dependency.prepTasks[.chat]=Task {try? await Task.sleep(for:.seconds(10))}
+        dependency.resumePreparation(.images);await wait(20);dependency.pausePreparation(.chat);await wait(1100)
+        check(dependency.state.preparations["Images"]?.status == .paused && dependency.prepTasks[.images]==nil,"Optional setup pauses when its mandatory dependency is deliberately paused")
+        dependency.pausePreparation(.images)
+        let pausedRoot=directory.appendingPathComponent("interrupted-preparation")
+        var pausedState=Snapshot();pausedState.runtimeVersion=1;pausedState.seeded=true;pausedState.selected=[.chat,.images]
+        pausedState.preparations=["Chat":Preparation(progress:0.42,status:.downloading),"Images":Preparation(progress:0,status:.cancelled),"Video":Preparation(progress:0.2,status:.failed)]
+        try Persistence(directory:pausedRoot).save(pausedState)
+        let pausedStore=AppStore(directory:pausedRoot,runtime:LocalRuntime(root:pausedRoot,catalog:ModelCatalog(models:[tinySafe,tinyImage])))
+        check(pausedStore.state.preparations["Chat"]?.status == .paused && pausedStore.state.preparations["Chat"]?.progress==0.42,"Interrupted real download restores resumable progress")
+        check(pausedStore.state.preparations["Images"]?.status == .cancelled && pausedStore.state.preparations["Video"]?.status == .failed,"Relaunch preserves deliberately cancelled and failed optional jobs")
+        check(pausedStore.prepTasks.isEmpty,"Incomplete pre-onboarding selection never starts a surprise download")
+        realRouting.state.webSearch=true
+        var turns=0;var spoken="";var receivedTool=false
+        let sharedReply=try await realRouting.runChatLoop(chatID:UUID(),mode:.safe,history:[.init(role:"user",content:"Check a source")],model:"test",countTokens:{_ in 20},stream:{request,delta in
+            turns += 1
+            if turns==1 {
+                return MLXChatCompletion(model:"test",content:"",reasoningContent:nil,toolCalls:[.init(id:"tool-1",function:.init(name:"disabled_test_tool",arguments:"{}"))],finishReason:"tool_calls",usage:nil,requestElapsedSeconds:nil)
+            }
+            receivedTool=request.messages.contains{$0.role=="tool" && $0.toolCallID=="tool-1" && ($0.textContent?.contains("unavailable") ?? false)}
+            await delta("A grounded answer.")
+            return MLXChatCompletion(model:"test",content:"A grounded answer.",reasoningContent:nil,toolCalls:[],finishReason:"stop",usage:nil,requestElapsedSeconds:nil)
+        },onDelta:{spoken += $0},onToolRound:{})
+        check(turns==2 && receivedTool && sharedReply.text==spoken && spoken=="A grounded answer.","Shared voice/text harness processes tools before streamed final answer")
+        var rejectedBudget=false
+        do {_ = try await realRouting.runChatLoop(chatID:UUID(),mode:.safe,history:[],model:"test",countTokens:{_ in 6500},stream:{_,_ in throw RuntimeFailure.message("Unexpected generation")},onDelta:{_ in},onToolRound:{})}catch{rejectedBudget=error.localizedDescription.contains("context budget")}
+        check(rejectedBudget,"Shared voice/text harness enforces real context budget before generation")
         check(s.state.selected == [.chat],"Chat selected by default")
         check(abs(s.total-2.4)<0.001,"Initial total")
         s.next();check(s.state.step==1,"Welcome to capability selection")
@@ -77,6 +162,24 @@ import AVFoundation
         s.state.webSearch=true;s.save();let skillsRestored=AppStore(directory:directory);check(skillsRestored.skills==s.skills && skillsRestored.state.webSearch && skillsRestored.state.fileReadingEnabled==false,"Skills and tool choices persist")
         s.deleteSkill(skill.id);check(s.skills.count==1 && s.skills[0].name=="Writing style","Delete one skill without removing another")
         check(s.macSpecs.memoryGB>0 && s.macSpecs.freeStorageGB>=0,"Hardware summary reads actual memory and free storage")
+        check(s.mediaKind("draw a cat")=="image","Draw requests stay images")
+        check(s.mediaKind("Show me an image of a glass house")=="image","A sentence can ask for an image")
+        check(s.mediaKind("Can you create a video of the coast")=="video","A sentence can ask for a video")
+        check(s.mediaKind("Help me think through the product")==nil,"Ordinary chat stays text")
+        check(s.mediaKind("/video a short clip")=="video","Slash video command still routes")
+        let catalogURL=URL(fileURLWithPath:FileManager.default.currentDirectoryPath).appendingPathComponent("Resources/model-catalog.json")
+        let catalog=try JSONDecoder().decode(ModelCatalog.self,from:Data(contentsOf:catalogURL))
+        check(catalog.models.contains{$0.id=="evil" && $0.enabled} && catalog.models.contains{$0.id=="zimage" && !$0.enabled},"Catalog enables Evil and leaves Z-Image disabled")
+        let runtime=LocalRuntime(root:directory.appendingPathComponent("catalog-runtime"))
+        let chatIDs=runtime.models(for:.chat).map(\.id)
+        check(chatIDs.contains("safe") && chatIDs.contains("evil") && !chatIDs.contains("zimage"),"Chat preparation includes Evil and excludes Z-Image")
+        let realDir=directory.appendingPathComponent("real-reset")
+        let real=AppStore(directory:realDir)
+        let marker=real.runtime.modelRoot.appendingPathComponent("keep.txt")
+        try Data("keep".utf8).write(to:marker)
+        real.resetData()
+        check(real.error==nil && real.state.chats.isEmpty,"Clear local data succeeds outside preview")
+        check(FileManager.default.fileExists(atPath:marker.path),"Clear local data leaves downloaded models")
         print("\n\(assertions) checks passed.")
     }
 }

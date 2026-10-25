@@ -13,8 +13,8 @@ struct WorkspaceView: View {
             .background(scheme == .dark ? Color(hex:0x20232B):Color(hex:0xFAF9F6))
             .sheet(isPresented:Binding(get:{renaming != nil},set:{if !$0{renaming=nil}})){VStack(alignment:.leading,spacing:20){Text("Name this conversation").font(.title2);TextField("Conversation title",text:$renameText).textFieldStyle(.roundedBorder).onSubmit{commitRename()};HStack{Button("Cancel"){renaming=nil}.keyboardShortcut(.cancelAction);Spacer();Button("Save"){commitRename()}.keyboardShortcut(.defaultAction)}}.padding(28).frame(width:420)}
             .sheet(item:$editing){m in VStack(alignment:.leading,spacing:16){Text("Edit your message").font(.title2);Text("Saving replaces the replies that follow this message.").foregroundStyle(.secondary);TextEditor(text:$editText).font(.body).frame(height:130).padding(8).background(.quaternary,in:RoundedRectangle(cornerRadius:12));HStack{Button("Cancel"){editing=nil};Spacer();Button("Save & send"){store.editMessage(m,text:editText);editing=nil}.buttonStyle(PrimaryButton()).disabled(editText.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)}}.padding(28).frame(width:520)}
-            .confirmationDialog("Delete this conversation?",isPresented:Binding(get:{deleting != nil},set:{if !$0{deleting=nil}})){Button("Delete conversation",role:.destructive){if let id=deleting{store.delete(id)};deleting=nil};Button("Cancel",role:.cancel){deleting=nil}}message:{Text("This removes it from this prototype's history.")}
-            .sheet(isPresented:$sourcePreview){VStack(alignment:.leading,spacing:20){Text("Sample source").font(.title2);Text("Weekend notebook").font(.headline);Text("A fictional source card for this preview.\n\nLeave one afternoon unplanned. Choose a place by the water. Bring a notebook and follow your curiosity.").lineSpacing(7);Text("Local fixture. No web or account data was retrieved.").font(.caption).foregroundStyle(.secondary);Button("Done"){sourcePreview=false}}.padding(32).frame(width:460)}
+            .confirmationDialog("Delete this conversation?",isPresented:Binding(get:{deleting != nil},set:{if !$0{deleting=nil}})){Button("Delete conversation",role:.destructive){if let id=deleting{store.delete(id)};deleting=nil};Button("Cancel",role:.cancel){deleting=nil}}message:{Text("This removes it from your history.")}
+            .sheet(isPresented:$sourcePreview){VStack(alignment:.leading,spacing:20){Text("Connected apps").font(.title2);ConnectorsList(store:store);Button("Done"){sourcePreview=false}}.padding(32).frame(width:460)}
     }
     func commitRename(){if let id=renaming{store.rename(id,renameText)};renaming=nil}
     var sidebarView:some View {
@@ -61,9 +61,11 @@ struct WorkspaceView: View {
     }
     var voiceLayer:some View {
         VStack(spacing:10) {
-            Button{store.voice.sampleTurn()}label:{FluidOrb(speaking:store.voice.phase=="Speaking")}.buttonStyle(.plain).accessibilityLabel("Speak")
-            if store.voice.denied {Text("Microphone isn't available in this preview.").font(.system(size:12)).foregroundStyle(.secondary)}
-        }
+            Button{store.voice.sampleTurn()}label:{FluidOrb(speaking:store.voice.phase=="Speaking")}.buttonStyle(.plain).accessibilityLabel("Record or finish speaking")
+            Text(store.voice.phase).font(.system(size:12)).foregroundStyle(.secondary).lineLimit(3)
+            if !store.voice.transcript.isEmpty {ScrollView{Text(store.voice.transcript).font(.system(size:13)).textSelection(.enabled)}.frame(maxHeight:100)}
+            HStack{Button(store.voice.muted ? "Unmute":"Mute"){store.voice.toggleMute()};Button("Interrupt"){store.voice.interrupt()};Button("End voice"){store.voice.end()}}.font(.caption)
+        }.frame(maxWidth:680)
     }
     var modeMenu:some View {
         Menu{Button("Safe Mode"){store.setMode(.safe)};Button("Evil Mode"){store.setMode(.evil)}}label:{HStack(spacing:4){Text(isEvil ? "Evil Mode":"Safe Mode").font(.system(size:13,weight:.medium));Image(systemName:"chevron.down").font(.system(size:9,weight:.semibold))}.foregroundStyle(.primary.opacity(0.72))}.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Only this chat. New chats start in Safe Mode.").accessibilityLabel("Evil Mode for this chat")
@@ -77,15 +79,15 @@ struct WorkspaceView: View {
                 formattedText(m.text)
                 if m.status=="preparing"{ProgressView().controlSize(.small)}
                 if let a=m.artifact{ArtifactCard(store:store,artifact:a)}
-                if m.sources{Button{sourcePreview=true}label:{Label("Weekend notebook · Sample source",systemImage:"doc.text.magnifyingglass").font(.caption).padding(12).background(Color.sky.opacity(0.12),in:RoundedRectangle(cornerRadius:12))}.buttonStyle(.plain)}
+                if let links=m.sourceLinks,!links.isEmpty {ForEach(links){source in if let url=URL(string:source.url){Link(destination:url){Label(source.title,systemImage:"link").font(.caption)}}}}
                 if let names=m.appliedSkillNames,!names.isEmpty{Text("Skills: "+names.joined(separator:", ")).font(.system(size:10)).foregroundStyle(.secondary)}
-                if m.status != "streaming" && m.status != "preparing"{HStack(spacing:13){IconButton(symbol:"doc.on.doc",title:"Copy response"){NSPasteboard.general.clearContents();NSPasteboard.general.setString(m.text,forType:.string)};IconButton(symbol:"arrow.clockwise",title:m.status=="failed" ? "Retry response":"Regenerate response"){store.regenerate(m)};IconButton(symbol:"speaker.wave.2",title:"Read sample aloud"){store.voice.readAloud()};if m.status=="stopped"{Text("Stopped").font(.caption).foregroundStyle(.secondary)};if m.status=="failed"{Button("Try again"){store.regenerate(m)}.font(.caption)}}.foregroundStyle(.secondary)}
+                if m.status != "streaming" && m.status != "preparing"{HStack(spacing:13){IconButton(symbol:"doc.on.doc",title:"Copy response"){NSPasteboard.general.clearContents();NSPasteboard.general.setString(m.text,forType:.string)};IconButton(symbol:"arrow.clockwise",title:m.status=="failed" ? "Retry response":"Regenerate response"){store.regenerate(m)};IconButton(symbol:"speaker.wave.2",title:"Read response aloud"){store.voice.readAloud(m.text)};if m.status=="stopped"{Text("Stopped").font(.caption).foregroundStyle(.secondary)};if m.status=="failed"{Button("Try again"){store.regenerate(m)}.font(.caption)}}.foregroundStyle(.secondary)}
             }}.frame(maxWidth:.infinity,alignment:.leading)
     }
     @ViewBuilder func formattedText(_ text:String)->some View {let blocks=text.components(separatedBy:"```");VStack(alignment:.leading,spacing:14){ForEach(Array(blocks.enumerated()),id:\.offset){i,block in if i%2==1 {Text(block).font(.system(size:13,design:.monospaced)).textSelection(.enabled).padding(16).frame(maxWidth:.infinity,alignment:.leading).background(.primary.opacity(0.05),in:RoundedRectangle(cornerRadius:14))}else{Text((try? AttributedString(markdown:block,options:.init(interpretedSyntax:.inlineOnlyPreservingWhitespace))) ?? AttributedString(block)).font(.system(size:15)).lineSpacing(6).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading)}}}}
     var composer:some View {
         VStack(alignment:.leading,spacing:6) {
-            if store.dictating {HStack{Text("Listening…").font(.system(size:12)).foregroundStyle(.secondary);Spacer();Button("Cancel"){store.cancelDictation()}.font(.system(size:12))}}
+            if store.dictating {HStack{Text("Listening…").font(.system(size:12)).foregroundStyle(.secondary);Spacer();Button("Finish"){store.voice.finishRecording()};Button("Cancel"){store.cancelDictation()}.font(.system(size:12))}}
             if let c=store.current,!c.attachments.isEmpty {ScrollView(.horizontal){HStack{ForEach(c.attachments){a in HStack{Button{store.previewAttachment=a}label:{Label(a.filename,systemImage:"paperclip").lineLimit(1)}.buttonStyle(.plain);IconButton(symbol:"xmark",title:"Remove attachment"){store.removeAttachment(a)}}.font(.caption).padding(.horizontal,8).padding(.vertical,4).background(Color.primary.opacity(0.05),in:Capsule())}}}}
             ZStack(alignment:.topLeading){if (store.current?.draft ?? "").isEmpty{Text("Message "+Product.name).font(.system(size:16)).foregroundStyle(.tertiary).padding(.top,8).padding(.leading,4).allowsHitTesting(false)};ComposerEditor(text:Binding(get:{store.current?.draft ?? ""},set:{if store.current==nil{store.newChat()};store.setDraft($0)}),onSend:{store.send()}).frame(height:min(130,max(36,CGFloat((store.current?.draft.components(separatedBy:"\n").count ?? 1))*21+16)))}
             HStack(spacing:10) {
@@ -109,7 +111,7 @@ struct WorkspaceView: View {
         RoundedRectangle(cornerRadius:28,style:.continuous).strokeBorder(LinearGradient(colors:isEvil ? [Color(hex:0xE06B62),Color(hex:0xD4788C),Color(hex:0xA67BB8)]:[Color.primary.opacity(0.10),Color.primary.opacity(0.06)],startPoint:.topLeading,endPoint:.bottomTrailing),lineWidth:isEvil ? 1.5:1)
     }
     var plusMenu:some View {
-        Menu{Button("Attach a file…"){store.chooseAttachment()};Button("Add demo image"){if store.current==nil{store.newChat()};store.addDemoAttachment()};Divider();Menu("Tools"){Toggle("Web search",isOn:$store.state.webSearch);Toggle("Read attachments",isOn:Binding(get:{store.state.fileReadingEnabled != false},set:{store.state.fileReadingEnabled=$0}));Button("All tools…"){store.openCustomize("Tools")}};Menu("Skills"){ForEach(store.skills){skill in Toggle(skill.name,isOn:Binding(get:{store.skills.first{$0.id==skill.id}?.isEnabled ?? false},set:{store.setSkillEnabled(skill.id,$0)}))};if store.skills.isEmpty{Button("Add a skill…"){store.openCustomize("Skills")}};Button("All skills…"){store.openCustomize("Skills")}};Menu("Plugins"){ForEach(Provider.allCases){p in Button("\(p.rawValue) · \((store.state.connections[p.rawValue] ?? .disconnected).rawValue)"){if store.state.connections[p.rawValue] == .connected{sourcePreview=true}else{store.consent=p}}};Button("All plugins…"){store.openCustomize("Plugins")}}}label:{Image(systemName:"plus").font(.system(size:18,weight:.medium)).foregroundStyle(.primary).frame(width:28,height:32)}.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Add")
+        Menu{Button("Attach a file…"){store.chooseAttachment()};Divider();Menu("Tools"){Toggle("Web search",isOn:$store.state.webSearch);Toggle("Read attachments",isOn:Binding(get:{store.state.fileReadingEnabled != false},set:{store.state.fileReadingEnabled=$0}));Button("All tools…"){store.openCustomize("Tools")}};Menu("Skills"){ForEach(store.skills){skill in Toggle(skill.name,isOn:Binding(get:{store.skills.first{$0.id==skill.id}?.isEnabled ?? false},set:{store.setSkillEnabled(skill.id,$0)}))};if store.skills.isEmpty{Button("Add a skill…"){store.openCustomize("Skills")}};Button("All skills…"){store.openCustomize("Skills")}};Menu("Plugins"){ForEach(Provider.allCases){p in Button("\(p.rawValue) · \((store.state.connections[p.rawValue] ?? .disconnected).rawValue)"){if store.state.connections[p.rawValue] == .connected{sourcePreview=true}else{store.consent=p}}};Button("All plugins…"){store.openCustomize("Plugins")}}}label:{Image(systemName:"plus").font(.system(size:18,weight:.medium)).foregroundStyle(.primary).frame(width:28,height:32)}.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Add")
     }
     @ViewBuilder var trailingAction:some View {
         if store.voice.isOpen {
@@ -124,7 +126,8 @@ struct WorkspaceView: View {
     func openVoice(){
         guard store.state.preparations[Capability.voice.rawValue]?.status == .ready else {prepareVoice();return}
         if store.current==nil {store.newChat()}
-        store.voice.onExchange={user,reply in store.appendVoiceExchange(user,reply)}
+        let owner=store.state.selectedChatID
+        store.voice.onExchange={user,reply in guard store.state.selectedChatID==owner else{return};store.appendVoiceExchange(user,reply)}
         store.voice.open()
         if !store.voice.denied {store.voice.sampleTurn()}
     }

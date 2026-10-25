@@ -12,29 +12,57 @@ import UniformTypeIdentifiers
     @Published var revealInChat = false; @Published var failPreparation = false; @Published var failNextResponse = false
     @Published var search = ""; @Published var dictating = false
     let macSpecs = MacSpecs.read()
-    let persistence: Persistence; let simulation: SimulationService; var voice: VoiceService
+    let persistence: Persistence; let simulation: SimulationService; let isPreview: Bool; let runtime: LocalRuntime; var voice: VoiceService
+    @Published var modelDetails: [String:String] = [:]
+    @Published var pendingTool: PendingTool?
+    var toolApproval: CheckedContinuation<Bool,Never>?
+    var responseOwners: [UUID:UUID] = [:]
     private var voiceObservation: AnyCancellable?
-    private var prepTasks: [Capability:Task<Void,Never>] = [:]
-    private var responseTasks: [UUID:Task<Void,Never>] = [:]
-    private var dictationTask: Task<Void,Never>?
-    init(directory: URL? = nil, simulation: SimulationService = .init()) {
-        persistence=Persistence(directory:directory); self.simulation=simulation;voice=VoiceService(simulation:simulation)
+    var prepTasks: [Capability:Task<Void,Never>] = [:]
+    var responseTasks: [UUID:Task<Void,Never>] = [:]
+    var dictationTask: Task<Void,Never>?
+    var connectorTasks: [String:Task<Void,Never>] = [:]
+    init(directory: URL? = nil, simulation: SimulationService? = nil, runtime: LocalRuntime? = nil) {
+        persistence=Persistence(directory:directory); self.simulation=simulation ?? .init();isPreview=simulation != nil;self.runtime=runtime ?? LocalRuntime(root:persistence.directory);voice=VoiceService(simulation:simulation ?? .init())
         var restored=persistence.load() ?? Snapshot()
-        for key in restored.preparations.keys { if restored.preparations[key]?.status != .ready {restored.preparations[key]?.status = .paused} }
+        for key in restored.preparations.keys {
+            if let status=restored.preparations[key]?.status,[JobStatus.queued,.preparing,.downloading,.checking].contains(status) {restored.preparations[key]?.status = .paused}
+        }
         for c in restored.chats.indices {for m in restored.chats[c].messages.indices {if ["streaming","preparing"].contains(restored.chats[c].messages[m].status){restored.chats[c].messages[m].status="stopped"}}}
+        if !isPreview {
+            if restored.runtimeVersion != 1 {
+                restored.runtimeVersion=1;restored.preparations=[:];restored.onboardingComplete=false;restored.step=restored.seeded ? 1:0
+                restored.connections=[:]
+            } else {
+                let includeEvil=restored.evilEnabled || restored.defaultMode == .evil
+                for capability in Capability.allCases where restored.preparations[capability.rawValue]?.status == .ready {
+                    if !self.runtime.installedModelsVerified(for:capability,includeEvil:includeEvil) {restored.preparations[capability.rawValue]?.status = .paused}
+                }
+            }
+        }
+        restored.selected.insert(.chat)
         state=restored
         voiceObservation=voice.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
-        if !state.seeded {restoreSamples()}
+        if !state.seeded {if isPreview {restoreSamples()} else {state.seeded=true}}
+        if !isPreview {voice.runtime=self.runtime;voice.reply={ [weak self] text in guard let self else{throw RuntimeFailure.message("Voice ended.")};return try await self.voiceReply(text)};voice.streamReply={ [weak self] text,onDelta in guard let self else{throw RuntimeFailure.message("Voice ended.")};return try await self.voiceReply(text,onDelta:onDelta)}}
         dropUnfittable()
         save()
+        if !isPreview {
+            if state.onboardingComplete || state.step==3 {resumePreparation(.chat)}
+            Task { [weak self] in await self?.repairVideoMetadata() }
+        }
     }
     var current: Conversation? {state.chats.first{$0.id==state.selectedChatID}}
-    var total: Double {state.selected.reduce(0){$0+$1.gb}}
+    var includesEvil:Bool {state.evilEnabled || state.defaultMode == .evil}
+    var total: Double {isPreview ? state.selected.reduce(0){$0+$1.gb}:Double(runtime.bytes(for:state.selected,includeEvil:includesEvil))/1_000_000_000}
+    func sizeGB(_ c:Capability)->Double {isPreview ? c.gb:Double(runtime.bytes(for:c,includeEvil:includesEvil))/1_000_000_000}
+    func sizeLabel(_ c:Capability)->String {isPreview ? String(format:"%.1f GB",c.gb):ByteCountFormatter.string(fromByteCount:runtime.bytes(for:c,includeEvil:includesEvil),countStyle:.file)}
     var chatReady: Bool {state.preparations[Capability.chat.rawValue]?.status == .ready}
     var filteredChats: [Conversation] {state.chats.filter{search.isEmpty || ($0.title+" "+$0.messages.map(\.text).joined(separator:" ")).localizedCaseInsensitiveContains(search)}.sorted{$0.updated>$1.updated}}
     func save() {do {try persistence.save(state)} catch {self.error="Your changes could not be saved. \(error.localizedDescription)"}}
     func updateChat(_ id: UUID, _ action: (inout Conversation)->Void) {guard let i=state.chats.firstIndex(where:{$0.id==id}) else{return};action(&state.chats[i])}
     func available(_ c: Capability) -> Bool {
+        if !isPreview {return macSpecs.memoryGB >= (c == .chat ? 12:16) && !runtime.models(for:c).isEmpty}
         if c == .chat {return true}
         if state.hardware == .storage {return false}
         return c != .video || state.hardware != .everyday
@@ -47,7 +75,7 @@ import UniformTypeIdentifiers
     func toggle(_ c: Capability) {
         guard c != .chat else{return}
         guard available(c) else {
-            error = state.hardware == .storage ? "Not enough space for \(c.rawValue).":"Video needs more memory. Choose Studio Mac in Preview to explore video."
+            error = state.hardware == .storage ? "Not enough space for \(c.rawValue).":"Video needs more memory."
             return
         }
         if state.selected.contains(c){state.selected.remove(c);cancelPreparation(c)} else {state.selected.insert(c)}
@@ -67,6 +95,7 @@ import UniformTypeIdentifiers
     func setMode(_ mode: BehaviorMode) {
         if mode == .evil {state.evilEnabled=true}
         if let id=state.selectedChatID{updateChat(id){$0.mode=mode}}
+        if !isPreview && mode == .evil,let m=try? runtime.model("evil"),!runtime.installedModelVerified(m){prepareEvil()}
     }
     func restartOnboarding() {voice.end();for c in Capability.allCases{pausePreparation(c)};state.preparations=[:];state.onboardingComplete=false;state.step=0;settingsOpen=false}
     func setPreparationFailure(_ enabled: Bool) {
@@ -77,11 +106,15 @@ import UniformTypeIdentifiers
             if state.onboardingComplete {settingsTab="Capabilities";settingsOpen=true}
         }
     }
-    func startPreparation() {for c in state.selected {resumePreparation(c)}}
+    func startPreparation() {resumePreparation(.chat);for c in Capability.allCases where c != .chat && state.selected.contains(c) {resumePreparation(c)}}
     func pausePreparation(_ c: Capability) {prepTasks[c]?.cancel();prepTasks[c]=nil;if state.preparations[c.rawValue]?.status != .ready {var p=state.preparations[c.rawValue] ?? Preparation();p.status = .paused;state.preparations[c.rawValue]=p}}
     func cancelPreparation(_ c: Capability) {prepTasks[c]?.cancel();prepTasks[c]=nil;state.preparations[c.rawValue]=Preparation(progress:0,status:.cancelled)}
     func resumePreparation(_ c: Capability) {
         guard available(c), state.selected.contains(c), prepTasks[c]==nil, state.preparations[c.rawValue]?.status != .ready else{return}
+        if !isPreview {
+            if c != .chat && !chatReady {resumePreparation(.chat)}
+            prepareReal(c);return
+        }
         var p=state.preparations[c.rawValue] ?? Preparation();p.status = .preparing;state.preparations[c.rawValue]=p
         prepTasks[c]=Task { [weak self] in
             guard let self else{return}
@@ -99,28 +132,37 @@ import UniformTypeIdentifiers
             } catch { }
         }
     }
-    func retryPreparation(_ c: Capability) {failPreparation=false;resumePreparation(c)}
+    func retryPreparation(_ c: Capability) {
+        failPreparation=false
+        if state.preparations[c.rawValue]?.status == .ready {
+            if !isPreview && c == .chat && (state.evilEnabled || state.defaultMode == .evil) {prepareEvil()}
+            return
+        }
+        resumePreparation(c)
+    }
     func enterChat() {guard chatReady else{return};state.onboardingComplete=true;let id=newChat();let initialMode=state.defaultMode;updateChat(id){$0.mode=initialMode};state.defaultMode = .safe}
     @discardableResult func newChat() -> UUID {voice.end();cancelDictation();let c=Conversation(mode:.safe);state.chats.insert(c,at:0);state.selectedChatID=c.id;search="";return c.id}
     func select(_ id: UUID) {voice.end();cancelDictation();state.selectedChatID=id}
     func rename(_ id: UUID,_ title: String) {let t=title.trimmingCharacters(in:.whitespacesAndNewlines);if !t.isEmpty{updateChat(id){$0.title=t;$0.updated=Date()}}}
     func delete(_ id: UUID) {stop(id);state.chats.removeAll{$0.id==id};if state.selectedChatID==id{state.selectedChatID=state.chats.first?.id;if state.selectedChatID==nil{newChat()}}}
     func setDraft(_ text: String) {if let id=state.selectedChatID{updateChat(id){$0.draft=text}}}
-    func stop(_ id: UUID) {responseTasks[id]?.cancel();responseTasks[id]=nil;updateChat(id){c in for i in c.messages.indices where ["streaming","preparing"].contains(c.messages[i].status){c.messages[i].status="stopped"}}}
+    func stop(_ id: UUID) {responseTasks[id]?.cancel();responseTasks[id]=nil;responseOwners[id]=nil;if pendingTool?.chatID==id {resolveTool(false)};updateChat(id){c in for i in c.messages.indices where ["streaming","preparing"].contains(c.messages[i].status){c.messages[i].status="stopped"}}}
     func isRunning(_ id: UUID) -> Bool {responseTasks[id] != nil}
     func send() {
         guard let c=current,!isRunning(c.id) else{return}
         let text=c.draft.trimmingCharacters(in:.whitespacesAndNewlines);guard !text.isEmpty || !c.attachments.isEmpty else{return}
-        let p=text.lowercased();let kind:String? = p.contains("video") || p.contains("clip") ? "video" : p.contains("image") || p.contains("photograph") || p.contains("draw ") ? "image":nil
+        let parent=isPreview ? nil:imageEditSource(text,in:c)
+        let p=text.lowercased();let kind:String? = parent?.kind ?? (isPreview ? (p.contains("video") || p.contains("clip") ? "video" : p.contains("image") || p.contains("photograph") || p.contains("draw ") ? "image":nil):mediaKind(text))
         if let kind {
             let cap:Capability=kind == "video" ? .video:.images
-            guard available(cap) else{error="Video needs more memory. Your draft is saved. Try Studio Mac in Preview.";return}
+            guard available(cap) else{error="Video needs more memory. Your draft is saved.";return}
             guard state.preparations[cap.rawValue]?.status == .ready else {state.selected.insert(cap);resumePreparation(cap);settingsTab="Capabilities";settingsOpen=true;error="Preparing \(cap.rawValue.lowercased()). Your draft is waiting here.";return}
         }
         updateChat(c.id){chat in chat.messages.append(Message(role:"user",text:text,attachments:chat.attachments));chat.draft="";chat.attachments=[];chat.updated=Date();if chat.messages.count==1{chat.title=String(text.prefix(45))}}
-        startResponse(c.id,prompt:text,kind:kind)
+        startResponse(c.id,prompt:text,kind:kind,parent:parent)
     }
     func startResponse(_ id: UUID,prompt: String,kind: String? = nil,parent: Artifact? = nil,trim: (Double,Double)? = nil) {
+        if !isPreview {startRealResponse(id,prompt:prompt,kind:kind,parent:parent,trim:trim);return}
         stop(id);let msg=Message(role:"assistant",text:kind == nil ? "":"Preparing your \(kind!)…",status:kind == nil ? "streaming":"preparing",jobKind:kind,sourceArtifact:parent,trimRange:trim.map{[$0.0,$0.1]})
         updateChat(id){$0.messages.append(msg)}
         let mode=state.chats.first{$0.id==id}?.mode ?? .safe
@@ -147,7 +189,7 @@ import UniformTypeIdentifiers
         }
     }
     func updateMessage(_ chatID: UUID,_ messageID: UUID,_ action:(inout Message)->Void) {updateChat(chatID){c in guard let i=c.messages.firstIndex(where:{$0.id==messageID})else{return};action(&c.messages[i])}}
-    func regenerate(_ message: Message) {guard let c=current,let index=c.messages.firstIndex(where:{$0.id==message.id}),let user=c.messages[..<index].last(where:{$0.role=="user"}) else{return};stop(c.id);updateChat(c.id){$0.messages.removeSubrange(index...)};let p=user.text.lowercased();startResponse(c.id,prompt:user.text,kind:message.jobKind ?? message.artifact?.kind ?? (p.contains("video") ? "video":p.contains("image") || p.contains("photograph") ? "image":nil),parent:message.sourceArtifact,trim:message.trimRange.map{($0[0],$0[1])})}
+    func regenerate(_ message: Message) {guard let c=current,let index=c.messages.firstIndex(where:{$0.id==message.id}),let user=c.messages[..<index].last(where:{$0.role=="user"}) else{return};stop(c.id);updateChat(c.id){$0.messages.removeSubrange(index...)};startResponse(c.id,prompt:user.text,kind:message.jobKind ?? message.artifact?.kind ?? mediaKind(user.text),parent:message.sourceArtifact,trim:message.trimRange.flatMap{$0.count==2 ? ($0[0],$0[1]):nil})}
     func editMessage(_ message: Message,text: String) {guard let c=current,let i=c.messages.firstIndex(where:{$0.id==message.id}) else{return};stop(c.id);updateChat(c.id){$0.messages.removeSubrange(i...);$0.draft=text;$0.attachments=message.attachments};send()}
     func editArtifact(_ source: Artifact,prompt: String,trim:(Double,Double)? = nil) {guard let id=state.chats.first(where:{$0.messages.contains(where:{$0.artifact?.id==source.id})})?.id else{return};updateChat(id){$0.messages.append(Message(role:"user",text:prompt))};startResponse(id,prompt:prompt,kind:source.kind,parent:source,trim:trim);previewArtifact=nil}
     var skills: [SkillRecord] {state.skills ?? []}
@@ -169,8 +211,8 @@ import UniformTypeIdentifiers
         saveSkill(SkillRecord(name:title,instructions:text))
     }
     func chooseSkillFile() {let panel=NSOpenPanel();panel.allowedContentTypes=[.plainText,.init(filenameExtension:"md")!];panel.begin{result in if result == .OK,let url=panel.url{Task{@MainActor in self.importSkillFile(url)}}}}
-    func connect(_ p: Provider) {state.connections[p.rawValue] = .connected;consent=nil}
-    func disconnect(_ p: Provider) {state.connections[p.rawValue] = .disconnected}
+    func connect(_ p: Provider) {if !isPreview {connectReal(p);return};state.connections[p.rawValue] = .connected;consent=nil}
+    func disconnect(_ p: Provider) {if !isPreview {disconnectReal(p);return};state.connections[p.rawValue] = .disconnected}
     func expireConnection() {state.connections[Provider.gmail.rawValue] = .expired}
     func openCustomize(_ section: String = "Plugins") {customizeSection=["Plugins","Tools","Skills"].contains(section) ? section:"Plugins";settingsOpen=false;customizeOpen=true}
     func appendVoiceExchange(_ user: String, _ reply: String) {
@@ -193,14 +235,15 @@ import UniformTypeIdentifiers
     }
     func chooseAttachment() {let p=NSOpenPanel();p.allowsMultipleSelection=true;p.canChooseDirectories=false;p.begin { [weak self] result in if result == .OK {Task{@MainActor in for u in p.urls{self?.importAttachment(u)}}}}}
     func removeAttachment(_ a: Attachment) {if let id=state.selectedChatID{updateChat(id){$0.attachments.removeAll{$0.id==a.id}}}}
-    func dictate() {guard !dictating,let id=state.selectedChatID else{return};dictating=true;dictationTask=Task{[weak self] in guard let self else{return};do {try await simulation.wait(2.4);try Task.checkCancellation();updateChat(id){$0.draft += ($0.draft.isEmpty ? "":" ")+"Plan a calm, creative weekend by the sea."};dictating=false}catch{}}}
-    func cancelDictation(){dictationTask?.cancel();dictationTask=nil;dictating=false}
+    func dictate() {if !isPreview {dictateReal();return};guard !dictating,let id=state.selectedChatID else{return};dictating=true;dictationTask=Task{[weak self] in guard let self else{return};do {try await simulation.wait(2.4);try Task.checkCancellation();updateChat(id){$0.draft += ($0.draft.isEmpty ? "":" ")+"Plan a calm, creative weekend by the sea."};dictating=false}catch{}}}
+    func cancelDictation(){voice.cancelRecording();dictationTask?.cancel();dictationTask=nil;dictating=false}
     func exportChat() {guard let c=current else{return};let p=NSSavePanel();p.nameFieldStringValue=c.title+".json";p.allowedContentTypes=[.json];p.begin{r in if r == .OK,let u=p.url{do{try JSONEncoder().encode(c).write(to:u)}catch{Task{@MainActor in self.error=error.localizedDescription}}}}}
-    func saveArtifact(_ artifact: Artifact) {let p=NSSavePanel();p.nameFieldStringValue="\(Product.name)-\(artifact.kind)-v\(artifact.version)."+(artifact.kind == "video" ? "mp4":"png");p.allowedContentTypes=artifact.kind == "video" ? [.mpeg4Movie]:[.png];p.begin{r in if r == .OK,let u=p.url{do{try Data(contentsOf:Resources.url(artifact.filename)).write(to:u)}catch{Task{@MainActor in self.error=error.localizedDescription}}}}}
+    func saveArtifact(_ artifact: Artifact) {let p=NSSavePanel();p.nameFieldStringValue="\(Product.name)-\(artifact.kind)-v\(artifact.version)."+(artifact.kind == "video" ? "mp4":"png");p.allowedContentTypes=artifact.kind == "video" ? [.mpeg4Movie]:[.png];p.begin{r in if r == .OK,let u=p.url{do{try Data(contentsOf:self.artifactURL(artifact)).write(to:u)}catch{Task{@MainActor in self.error=error.localizedDescription}}}}}
     func restoreSamples() {
+        guard isPreview else{error="Sample conversations are available only in previews.";return}
         let image=Artifact(kind:"image",filename:"cliff-house-demo.png",prompt:"A glass house above the Atlantic at sunrise")
         state.chats=[Conversation(title:"An AI that feels like yours",messages:[Message(role:"user",text:"Help me shape a personal AI product idea."),Message(role:"assistant",text:"Make the first five minutes feel effortless. A clear promise, a few meaningful choices, and one delightful result.\n\nOwnership should feel like a possibility, not a technical chore.")]),Conversation(title:"A house at the edge of the world",messages:[Message(role:"user",text:"Create a cinematic photograph of a glass house above the Atlantic at sunrise."),Message(role:"assistant",text:"Quiet architecture. A little sea mist. Somewhere to think.",artifact:image)]),Conversation(title:"A slower kind of weekend",messages:[Message(role:"user",text:"Plan a calm, creative weekend by the sea."),Message(role:"assistant",text:simulation.response(to:"weekend",mode:.safe))])]
         state.seeded=true;state.selectedChatID=nil
     }
-    func resetData() {for c in Capability.allCases{cancelPreparation(c)};for id in Array(responseTasks.keys){stop(id)};voice.end();state=Snapshot();restoreSamples();settingsOpen=false}
+    func resetData() {for c in Capability.allCases{cancelPreparation(c)};for id in Array(responseTasks.keys){stop(id)};voice.end();state=Snapshot();if isPreview {restoreSamples()} else {state.seeded=true;error=nil};settingsOpen=false}
 }
