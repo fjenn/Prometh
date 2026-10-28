@@ -90,6 +90,7 @@ npm start         # NODE_ENV=production, serves dist/ and /api, default PORT=878
 Production must supply the key or an explicit private env-file path. Any other host can import
 `server/app.ts` and mount `handle(request)` for `/api/*`; no framework or hosting configuration is
 required. The Node adapter serves static files and uses the built index for SPA routes.
+Any reverse proxy in front of the Node server must preserve the Host header for the same-origin check.
 
 Web search defaults on in Customize → Tools. Current-events cues prefetch three distinct-domain
 pages; only readable fetched pages receive numbered citations. Tool results and schemas share the
