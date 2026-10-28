@@ -14,18 +14,19 @@ export const TOOL_RESULT_CHARS = 4400
 export const schemas = (search: boolean, connected: string[]): ToolSchema[] => [
   ...(search ? [{ name: 'web_search', description: 'Search the web and read up to three pages.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } }] : []),
   ...(connected.length ? [
-    { name: 'connectors_search', description: `Find action input schemas. Connected apps: ${connected.join(', ')}. Search before executing.`, parameters: { type: 'object', properties: { query: { type: 'string' }, toolkit: { type: 'string' } }, required: ['query'] } },
-    { name: 'connectors_execute', description: 'Run an action using its exact input schema. The app handles user consent.', parameters: { type: 'object', properties: { tool: { type: 'string' }, arguments: { type: 'object' } }, required: ['tool', 'arguments'] } },
+    { name: 'connectors_search', description: `To act in connected apps (${connected.join(', ')}), first search with a short query for action slugs and input schemas, then call connectors_execute. The backend knows the connected user, so do not ask for usernames or IDs implied by the connected account.`, parameters: { type: 'object', properties: { query: { type: 'string' }, toolkit: { type: 'string' } }, required: ['query'] } },
+    { name: 'connectors_execute', description: 'After connectors_search, run the exact returned action slug with arguments matching its input schema. The backend supplies the connected user identity and the app handles consent.', parameters: { type: 'object', properties: { tool: { type: 'string' }, arguments: { type: 'object' } }, required: ['tool', 'arguments'] } },
   ] : []),
 ]
 export function toolsBlock(tools: ToolSchema[]) {
-  return tools.length ? '\n\n<tools>\n' + tools.map((t) => JSON.stringify({ type: 'function', function: t })).join('\n') + '\n</tools>\nTo use a tool, reply with <tool_call>{"name":"tool_name","arguments":{}}</tool_call>. Wait for its tool_response. Otherwise answer normally.' : ''
+  // Verbatim instructions from Qwen/Qwen3.5-9B's chat_template.jinja.
+  return tools.length ? '# Tools\n\nYou have access to the following functions:\n\n<tools>\n' + tools.map((t) => JSON.stringify({ type: 'function', function: t })).join('\n') + '\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>' : ''
 }
 /** Hide complete protocol blocks and an opening tag still arriving token by token. */
 export function hideToolMarkup(text: string) {
-  const visible = text.replace(/<tool_(?:call|response)\b[\s\S]*$/i, '')
+  const visible = text.replace(/<(?:tool_(?:call|response)\b|function=|parameter=)[\s\S]*$/i, '')
   const start = visible.lastIndexOf('<')
-  if (start >= 0 && ['<tool_call>', '</tool_call>', '<tool_response>', '</tool_response>'].some((tag) => tag.startsWith(visible.slice(start).toLowerCase()))) return visible.slice(0, start)
+  if (start >= 0 && ['<tool_call>', '</tool_call>', '<tool_response>', '</tool_response>', '<function=', '</function>', '<parameter=', '</parameter>'].some((tag) => tag.startsWith(visible.slice(start).toLowerCase()))) return visible.slice(0, start)
   return visible
 }
 export function parseToolCalls(text: string): ToolCall[] {
@@ -33,12 +34,41 @@ export function parseToolCalls(text: string): ToolCall[] {
   for (const match of text.matchAll(/<tool_call>\s*([\s\S]*?)(?:<\/tool_call>|$)/gi)) {
     try {
       const raw = match[1].replace(/^```(?:json)?\s*|\s*```$/g, '')
+      const fn = raw.trim().match(/^<function=([^\s<>]+)>\s*([\s\S]*?)<\/function>$/i)
+      if (fn) {
+        const parameters: [string, unknown][] = []
+        let end = 0
+        for (const parameter of fn[2].matchAll(/<parameter=([^\s<>]+)>([\s\S]*?)<\/parameter>/gi)) {
+          if (fn[2].slice(end, parameter.index).trim()) throw new Error('Invalid parameter block')
+          const text = parameter[2].trim()
+          let value: unknown = text
+          if (/^(?:\{|\[|")/.test(text) || /^(?:-?\d+(?:\.\d+)?(?:e[+-]?\d+)?|true|false|null)$/i.test(text)) {
+            try { value = JSON.parse(jsonrepair(text)) } catch { /* Keep non-JSON parameter values as raw strings. */ }
+          }
+          parameters.push([parameter[1], value])
+          end = parameter.index + parameter[0].length
+        }
+        if (fn[2].slice(end).trim()) throw new Error('Invalid parameter block')
+        calls.push({ name: fn[1], arguments: Object.fromEntries(parameters) })
+        continue
+      }
       const value = JSON.parse(jsonrepair(raw))
       const args = typeof value.arguments === 'string' ? JSON.parse(jsonrepair(value.arguments)) : value.arguments
       if (typeof value.name === 'string' && args && typeof args === 'object' && !Array.isArray(args)) calls.push({ name: value.name, arguments: args })
     } catch { /* An invalid call is handled as an error response, never executed. */ }
   }
   return calls
+}
+function renderToolCall(call: ToolCall) {
+  const parameters = Object.entries(call.arguments).map(([name, value]) => `<parameter=${name}>\n${value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value)}\n</parameter>\n`).join('')
+  return `<tool_call>\n<function=${call.name}>\n${parameters}</function>\n</tool_call>`
+}
+const isToolResponse = (turn: Turn) => turn.role === 'user' && /^<tool_response(?:\s|>)/.test(turn.content.trimStart())
+function appendToolResponse(turns: Turn[], response: string) {
+  const content = `<tool_response>\n${response.trim()}\n</tool_response>`
+  const previous = turns.at(-1)!
+  if (isToolResponse(previous)) previous.content += '\n' + content
+  else turns.push({ role: 'user', content })
 }
 /** Compact valid JSON, never a string sliced through JSON syntax. Schemas are returned one at a time if large. */
 export function boundedJSON(value: unknown, maxChars = TOOL_RESULT_CHARS): string {
@@ -75,8 +105,8 @@ export function budgetTurns(turns: Turn[], reserve = 850): Turn[] {
   if (budget < 300) throw new Error('Enabled skills and tools exceed the model context. Shorten your skills and try again.')
   // Pin the actual question even after several large responses have displaced older history.
   let question = -1
-  for (let i = turns.length - 1; i > 0; i--) if (turns[i].role === 'user' && !turns[i].content.startsWith('<tool_response')) { question = i; break }
-  const hasToolResults = turns.some((t) => t.role === 'user' && t.content.startsWith('<tool_response'))
+  for (let i = turns.length - 1; i > 0; i--) if (turns[i].role === 'user' && !isToolResponse(turns[i])) { question = i; break }
+  const hasToolResults = turns.some(isToolResponse)
   const pinned = question >= 0 ? { ...turns[question], content: turns[question].content.slice(-Math.min(hasToolResults ? 2400 : Infinity, Math.max(1, (budget - 80) * 3))) } : null
   if (pinned) budget -= tokens(pinned.content)
   const history: { index: number; turn: Turn }[] = []
@@ -87,7 +117,7 @@ export function budgetTurns(turns: Turn[], reserve = 850): Turn[] {
     const cost = tokens(turn.content)
     if (cost > budget) {
       // Never cut through tool JSON; if the latest result cannot fit, explain how to recover.
-      if (i === turns.length - 1 && turn.content.startsWith('<tool_response')) throw new Error('The latest tool result and enabled skills exceed the model context. Shorten your skills and try again.')
+      if (i === turns.length - 1 && isToolResponse(turn)) throw new Error('The latest tool result and enabled skills exceed the model context. Shorten your skills and try again.')
       continue
     }
     history.push({ index: i, turn }); budget -= cost
@@ -113,12 +143,13 @@ export async function runToolLoop(options: {
       options.signal.throwIfAborted()
       result = JSON.stringify({ ok: false, error: error instanceof Error ? error.message : 'Web search failed.' })
     }
-    turns.push({ role: 'user', content: `<tool_response name="web_search">${result}</tool_response>` })
+    appendToolResponse(turns, result)
   }
   for (let step = 0; step <= 4; step++) {
     options.signal.throwIfAborted()
     const tools = step < 4 ? options.tools : []
-    turns[0] = { role: 'system', content: base + toolsBlock(tools) + (options.hasSources?.() ? '\n\n' + citationRules : '') + (step === 4 ? '\nAnswer now from the available results. No more tool calls.' : '') }
+    const system = base + (options.hasSources?.() ? '\n\n' + citationRules : '') + (step === 4 ? '\nAnswer now from the available results. No more tool calls.' : '')
+    turns[0] = { role: 'system', content: tools.length ? toolsBlock(tools) + (system.trim() ? '\n\n' + system.trim() : '') : system }
     const result = await options.generate(budgetTurns(turns, options.reserveTokens ?? 850), (text) => options.onText(hideToolMarkup(text)))
     if (result.stopped || options.signal.aborted) return { ...result, text: hideToolMarkup(result.text) }
     const calls = parseToolCalls(result.text)
@@ -126,7 +157,7 @@ export async function runToolLoop(options: {
     if (step === 4) return { ...result, text: hideToolMarkup(result.text).trim() || 'I could not finish this request within the tool limit. Please try a narrower request.' }
     // One action per step avoids parallel writes and keeps consent tied to one visible card.
     const call = calls[0]
-    let response = '{"ok":false,"error":"Invalid tool call. Use a JSON object with name and arguments."}'
+    let response = '{"ok":false,"error":"Invalid tool call. Nest a function block with required parameter blocks inside tool_call."}'
     if (call) {
       if (!tools.some((t) => t.name === call.name)) response = '{"ok":false,"error":"Tool is unavailable."}'
       else {
@@ -136,7 +167,8 @@ export async function runToolLoop(options: {
         }
       }
     }
-    turns.push({ role: 'assistant', content: call ? `<tool_call>${JSON.stringify(call)}</tool_call>` : '<tool_call>{}</tool_call>' }, { role: 'user', content: `<tool_response>${response}</tool_response>` })
+    turns.push({ role: 'assistant', content: call ? renderToolCall(call) : result.text.trim() })
+    appendToolResponse(turns, response)
     options.onText('')
   }
   throw new Error('Tool loop did not finish.')
