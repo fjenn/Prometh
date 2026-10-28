@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { boundedJSON, budgetTurns, compactSchema, createToolRuntime, hideToolMarkup, parseToolCalls, runConnectorAction, runToolLoop, schemas, toolsBlock, type Turn } from '../src/engine/tools.ts'
+import { TOOL_RESULT_CHARS, boundedJSON, budgetTurns, compactConnectorResult, compactSchema, createToolRuntime, hideToolMarkup, parseToolCalls, plainReadIntent, readTarget, runConnectorAction, runToolLoop, schemas, toolsBlock, type Turn } from '../src/engine/tools.ts'
+import type { ConnectorTool } from '../src/engine/api.ts'
 import type { Source } from '../src/engine/search.ts'
 const toolCall = (name = 'web_search', args = { query: 'test' }) => `<tool_call>${JSON.stringify({ name, arguments: args })}</tool_call>`
 const nativeCall = `<tool_call>
@@ -136,9 +137,9 @@ test('tools precede persona, skills and citation rules and are absent when unava
 test('max four actions then final generation without tools, including a model that ignores cutoff', async () => {
   let executions = 0, generations = 0
   const result = await runToolLoop({ messages: initial, tools: schemas(true, []), signal: new AbortController().signal, onText: () => {},
-    generate: async (messages) => { generations++; if (generations === 5) { assert.ok(!messages[0].content.includes('<tools>')); assert.match(messages[0].content, /No more tool calls/) }; return { text: toolCall() } }, execute: async () => { executions++; return '{}' },
+    generate: async (messages) => { generations++; if (generations >= 5) { assert.ok(!messages[0].content.includes('<tools>')); assert.equal(messages.at(-1)!.content, 'Answer now using only the tool results above. Do not call tools.') }; return { text: toolCall('web_search', { query: String(generations) }) } }, execute: async () => { executions++; return '{}' },
   })
-  assert.equal(executions, 4); assert.equal(generations, 5)
+  assert.equal(executions, 4); assert.equal(generations, 6)
   assert.ok(!result.text.includes('tool_call'))
 })
 test('invalid JSON and unavailable tools feed an error without execution', async () => {
@@ -204,7 +205,7 @@ test('runtime executes a searched read action without approval', async (t) => {
     return Response.json(result)
   })
   await runtime.execute({ name: 'connectors_search', arguments: { query: 'list my repositories' } })
-  assert.deepEqual(JSON.parse(await runtime.execute({ name: 'connectors_execute', arguments: { tool, arguments: { per_page: 10 } } })), result)
+  assert.equal(await runtime.execute({ name: 'connectors_execute', arguments: { tool, arguments: { per_page: 10 } } }), 'Result of List repositories. State only facts present below.\nok: true\nrepositories: Total items 1, shown 1\n- name: example')
   assert.equal(fetch.mock.callCount(), 2)
   assert.equal(approvals, 0)
 })
@@ -350,4 +351,255 @@ test('search cancellation prevents further candidate batches and clears activity
   assert.equal(reads, 3)
   assert.equal(published, false)
   assert.equal(activity.at(-1), undefined)
+})
+
+const readAction: ConnectorTool = { slug: 'APP_LIST_ITEMS', name: 'List items', description: 'Read connected items', tags: ['readOnlyHint'], toolkit: 'app', input_parameters: { type: 'object', required: [] } }
+const otherAction: ConnectorTool = { ...readAction, slug: 'APP_GET_PROFILE', name: 'Get profile' }
+const searchCall = { name: 'connectors_search', arguments: { query: 'list items' } }
+
+test('plain read directly executes only the top action once, returns alternatives and registers every hint', async (t) => {
+  let approvals = 0
+  const bodies: unknown[] = []
+  const runtime = createToolRuntime({ request: 'Please LiSt my items', signal: new AbortController().signal, onActivity: () => {}, onSources: () => {}, getAllowed: () => [], approve: async () => { approvals++; return 'once' } })
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input).endsWith('/search')) return Response.json({ items: [readAction, otherAction] })
+    assert.equal(String(input), '/api/connectors/tools/execute')
+    bodies.push(JSON.parse(String(init?.body)))
+    return Response.json({ data: [{ name: 'Example', empty: null, url: 'https://example.org/item' }], successful: true, error: null, executed: true })
+  })
+  const response = await runtime.execute(searchCall)
+  assert.deepEqual(bodies, [{ tool: readAction.slug, arguments: {}, approved: false }])
+  assert.equal(approvals, 0)
+  assert.ok(response.startsWith('Result of List items. State only facts present below.'))
+  assert.match(response, /Executed APP_LIST_ITEMS \(List items\)/)
+  assert.match(response, /- name: Example; url: https:\/\/example.org\/item/)
+  assert.match(response, /other_actions: \[{"slug":"APP_GET_PROFILE","name":"Get profile"}\]/)
+  assert.ok(!response.includes('input_parameters'))
+  assert.ok(!response.includes('empty'))
+  assert.ok(response.length <= TOOL_RESULT_CHARS)
+  const second = JSON.parse(await runtime.execute(searchCall))
+  assert.equal(second.items.length, 2)
+  assert.equal(bodies.length, 1)
+  await runtime.execute({ name: 'connectors_execute', arguments: { tool: otherAction.slug, arguments: {} } })
+  assert.equal(bodies.length, 2)
+  assert.equal(approvals, 0)
+})
+
+test('direct execution requires a read verb, no write verb and a top read with no required inputs', async (t) => {
+  const cases = [
+    { request: 'delete my repo', top: readAction },
+    { request: 'List items then DELETE one', top: readAction },
+    { request: 'My items?', top: readAction },
+    { request: 'Can you shortlist my items?', top: readAction },
+    { request: 'List items', top: { ...readAction, slug: 'APP_DELETE_ITEMS', tags: ['deleteHint', 'readOnlyHint'] } },
+    { request: 'List items', top: { ...readAction, input_parameters: { type: 'object', required: ['owner'], properties: { owner: { type: 'string' } } } } },
+    { request: 'List items', top: undefined },
+  ]
+  for (const { request, top } of cases) {
+    const runtime = createToolRuntime({ request, signal: new AbortController().signal, onActivity: () => {}, onSources: () => {}, getAllowed: () => [], approve: async () => { throw new Error('must not ask') } })
+    const mock = t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+      assert.equal(String(input), '/api/connectors/tools/search')
+      return Response.json({ items: top ? [top, otherAction] : [] })
+    })
+    try {
+      const response = JSON.parse(await runtime.execute(searchCall))
+      assert.deepEqual(response.items.map((item: ConnectorTool) => item.slug), top ? [top.slug, otherAction.slug] : [])
+      assert.equal(mock.mock.callCount(), 1)
+      if (top?.input_parameters.required?.length) assert.deepEqual(response.items[0].input_parameters.required, ['owner'])
+    } finally { mock.mock.restore() }
+  }
+})
+
+test('direct read respects authoritative approval requirements and preserves declined/error payloads', async (t) => {
+  for (const consent of ['once', 'decline'] as const) {
+    let approvals = 0
+    const bodies: { approved: boolean }[] = []
+    const runtime = createToolRuntime({ request: 'Read items', signal: new AbortController().signal, onActivity: () => {}, onSources: () => {}, getAllowed: () => [], approve: async () => { approvals++; return consent } })
+    const mock = t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith('/search')) return Response.json({ items: [readAction] })
+      const body = JSON.parse(String(init?.body)); bodies.push(body)
+      return Response.json(body.approved ? { data: { name: 'Example' }, successful: true } : { ok: false, executed: false, error: 'approval required' })
+    })
+    try {
+      const response = await runtime.execute(searchCall)
+      assert.equal(approvals, 1)
+      assert.deepEqual(bodies.map((body) => body.approved), consent === 'once' ? [false, true] : [false])
+      if (consent === 'decline') assert.equal(JSON.parse(response).declined, true)
+      else assert.match(response, /name: Example/)
+    } finally { mock.mock.restore() }
+  }
+})
+
+test('direct read budgets a large result and a short list of alternative slugs without schemas', async (t) => {
+  const runtime = createToolRuntime({ request: 'Show items', signal: new AbortController().signal, onActivity: () => {}, onSources: () => {}, getAllowed: () => [], approve: async () => { throw new Error('must not ask') } })
+  const alternatives = Array.from({ length: 40 }, (_, i) => ({ ...otherAction, slug: `APP_GET_${i}_${'LONG_'.repeat(10)}ITEMS` }))
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => String(input).endsWith('/search')
+    ? Response.json({ items: [readAction, ...alternatives] })
+    : Response.json({ data: Array.from({ length: 30 }, (_, i) => ({ name: `Item ${i}`, description: `Item ${i} has a complete set of useful facts. `.repeat(5) })), successful: true, error: null }))
+  const response = await runtime.execute(searchCall)
+  assert.ok(response.length <= TOOL_RESULT_CHARS, String(response.length))
+  assert.match(response, /Showing \d+ of 30 items\./)
+  assert.ok(JSON.parse(response.split('\nother_actions: ')[1]).length > 0)
+})
+
+test('an announcement continues once and a second announcement becomes the final answer', async () => {
+  const announcement = 'Great, I found the exact tool needed. Let me fetch your items now.'
+  let generations = 0
+  const visible: string[] = []
+  const result = await runToolLoop({ messages: initial, tools: schemas(true, []), signal: new AbortController().signal, onText: (text) => visible.push(text),
+    generate: async (messages, onText) => {
+      if (generations++ === 1) {
+        assert.equal(messages.at(-2)!.content, announcement)
+        assert.equal(messages.at(-1)!.content, 'Continue: make the tool call now.')
+        assert.ok(messages.some((message) => message.content === 'question'))
+      }
+      onText(announcement)
+      return { text: announcement }
+    }, execute: async () => { throw new Error('must not execute') },
+  })
+  assert.equal(generations, 2)
+  assert.equal(result.text, announcement)
+  assert.deepEqual(visible, [announcement, '', announcement])
+})
+
+test('one announcement followed by a call returns the actual result', async () => {
+  const outputs = ["I'll look that up now.", toolCall(), 'Here is the answer.']
+  let executions = 0
+  const result = await runToolLoop({ messages: initial, tools: schemas(true, []), signal: new AbortController().signal, onText: () => {},
+    generate: async () => ({ text: outputs.shift()! }), execute: async () => { executions++; return 'Facts' },
+  })
+  assert.equal(result.text, 'Here is the answer.')
+  assert.equal(executions, 1)
+  assert.equal(outputs.length, 0)
+})
+
+test('substantive, long or tool-less answers are not nudged', async () => {
+  for (const [text, tools] of [
+    ['You have 12 items. Let me know if you need details.', schemas(true, [])],
+    ["I'll fetch the next page. The first page contains these items: alpha, beta.", schemas(true, [])],
+    ["I'll look into it. " + 'x'.repeat(400), schemas(true, [])],
+    ["I'll look into it.", []],
+  ] as const) {
+    let generations = 0
+    const result = await runToolLoop({ messages: initial, tools: [...tools], signal: new AbortController().signal, onText: () => {},
+      generate: async () => { generations++; return { text } }, execute: async () => { throw new Error('must not execute') },
+    })
+    assert.equal(generations, 1)
+    assert.equal(result.text, text)
+  }
+})
+
+test('cutoff strips tool markup and regenerates an empty answer once without executing tools', async () => {
+  for (const finalOutputs of [[toolCall(), 'Facts from the tool results.'], ['', ''], ['Facts from the tool results. ' + toolCall()]]) {
+    let generations = 0, executions = 0
+    const outputs = Array.from({ length: 4 }, (_, i) => toolCall('web_search', { query: String(i) })).concat(finalOutputs)
+    const result = await runToolLoop({ messages: initial, tools: schemas(true, []), signal: new AbortController().signal, onText: () => {},
+      generate: async (messages) => {
+        if (generations++ >= 4) {
+          assert.ok(!messages[0].content.includes('<tools>'))
+          assert.equal(messages.at(-1)!.content, 'Answer now using only the tool results above. Do not call tools.')
+          assert.ok(messages.some((message) => message.content === 'question'))
+          assert.ok(messages.some((message) => message.content.includes('Fetched facts')))
+        }
+        return { text: outputs.shift()! }
+      }, execute: async () => { executions++; return 'Fetched facts' },
+    })
+    assert.equal(executions, 4)
+    assert.equal(generations, 4 + finalOutputs.length)
+    assert.equal(result.text, finalOutputs.every((text) => !text) ? 'I could not finish this request within the tool limit. Please try a narrower request.' : 'Facts from the tool results.')
+  }
+})
+
+test('identical calls with reordered nested argument keys execute once while different actions still run', async () => {
+  const args = [{ query: 'same', filters: { a: 1, b: [2, 3] } }, { filters: { b: [2, 3], a: 1 }, query: 'same' }, { query: 'same', filters: { a: 1, b: [3, 2] } }]
+  let generations = 0, executions = 0
+  const result = await runToolLoop({ messages: initial, tools: schemas(true, []), signal: new AbortController().signal, onText: () => {},
+    generate: async (messages) => {
+      if (generations === 2) assert.deepEqual(JSON.parse(messages.at(-1)!.content.replace(/^<tool_response>\s*|\s*<\/tool_response>$/g, '')), { ok: false, error: 'Already done; the result is above. Answer now or use a different action.' })
+      return { text: generations < args.length ? `<tool_call>${JSON.stringify({ name: 'web_search', arguments: args[generations++] })}</tool_call>` : 'Answer' }
+    }, execute: async () => { executions++; return 'Facts' },
+  })
+  assert.equal(result.text, 'Answer')
+  assert.equal(executions, 2)
+})
+
+test('compaction unwraps successful data and removes empties, machine URLs, templates and deep objects', () => {
+  const result = compactConnectorResult({ data: { items: [{ name: 'Example', private: false, stars: 0, language: 'TypeScript', description: 'Some\ntext', html_url: 'https://example.org/item', homepage: 'https://example.net', api: 'https://api.example.org/item', template: 'https://example.org/item{/number}', nothing: null, blank: '', whitespace: '  ', missing: undefined, emptyArray: [], emptyObject: {}, deep: { nested: { beyond: { secret: 'Drop me' } } } }] }, successful: true, error: null, executed: true }, 'List items')
+  assert.ok(result.startsWith('Result of List items. State only facts present below.'))
+  assert.match(result, /Total items 1, shown 1/)
+  assert.match(result, /- name: Example; private: false; stars: 0; language: TypeScript; description: Some text; html_url: https:\/\/example.org\/item; homepage: https:\/\/example.net/)
+  for (const unwanted of ['api.', '{/number}', 'nothing', 'blank', 'whitespace', 'missing', 'emptyArray', 'emptyObject', 'Drop me', 'successful', 'executed']) assert.ok(!result.includes(unwanted), unwanted)
+})
+
+test('compaction bounds whole items and reports exact shown and response counts', () => {
+  const items = Array.from({ length: 30 }, (_, i) => ({ name: `Item-${i}`, description: `Description ${i} `.repeat(15), html_url: `https://example.org/item/${i}` }))
+  const output = compactConnectorResult({ data: { items, total_count: 900 }, successful: true, error: null }, 'List items')
+  const rows = output.split('\n').filter((line) => line.startsWith('- '))
+  assert.ok(rows.length > 0 && rows.length < items.length)
+  assert.ok(output.length <= TOOL_RESULT_CHARS)
+  assert.match(output, new RegExp(`Showing ${rows.length} of 30 items\\.`))
+  assert.match(output, new RegExp(`Total items 30, shown ${rows.length}`))
+  assert.ok(!output.includes('of 900 items'))
+  rows.forEach((row, i) => assert.equal(row, `- name: Item-${i}; description: ${items[i].description.trim()}; html_url: https://example.org/item/${i}`))
+  const huge = compactConnectorResult({ data: [Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`field${i}`, 'x'.repeat(10000)]))], successful: true }, 'List items')
+  assert.match(huge, /Showing 0 of 1 items\./)
+  assert.ok(!huge.includes('- field0:'))
+  assert.ok(huge.length <= TOOL_RESULT_CHARS)
+})
+
+test('compact records allow thirty short items to fit and preserve error and control payload shapes', () => {
+  const items = Array.from({ length: 30 }, (_, i) => ({ name: `Item ${i}`, private: false, language: 'TS', html_url: `https://example.org/${i}`, unused: null, api: `https://api.example.org/${i}` }))
+  const output = compactConnectorResult({ data: items, successful: true, error: null }, 'List items')
+  assert.equal(output.split('\n').filter((line) => line.startsWith('- ')).length, 30)
+  assert.match(output, /Total items 30, shown 30/)
+  assert.ok(!output.includes('Showing'))
+  assert.ok(output.length <= TOOL_RESULT_CHARS)
+  for (const payload of [
+    { ok: false, executed: false, error: 'approval required' },
+    { ok: false, executed: false, declined: true, error: 'User declined' },
+    { data: null, successful: false, error: 'Upstream failure' },
+  ]) assert.deepEqual(JSON.parse(compactConnectorResult(payload, 'List items')), payload)
+})
+
+test('empty records do not become phantom rows or change the original item count', () => {
+  const output = compactConnectorResult({ data: [null, {}, { name: 'Example', empty: { values: [] } }, []], successful: true }, 'List items')
+  assert.match(output, /Total items 4, shown 1/)
+  assert.match(output, /Showing 1 of 4 items\./)
+  assert.equal(output.split('\n').filter((line) => line.startsWith('- ')).length, 1)
+  assert.ok(!output.includes('empty'))
+})
+
+test('loop instructions preserve the question and latest result when budgeting context', () => {
+  const turns = budgetTurns([...initial, { role: 'assistant', content: 'x'.repeat(3000) }, { role: 'user', content: 'Continue: make the tool call now.' }, { role: 'assistant', content: nativeCall }, { role: 'user', content: '<tool_response>\n' + 'facts '.repeat(700) + '\n</tool_response>' }, { role: 'user', content: 'Answer now using only the tool results above. Do not call tools.' }])
+  assert.ok(turns.some((turn) => turn.content === 'question'))
+  assert.ok(turns.some((turn) => turn.content.includes('facts ')))
+  assert.throws(() => budgetTurns([...initial, { role: 'user', content: '<tool_response>\n' + 'x'.repeat(15000) + '\n</tool_response>' }, { role: 'user', content: 'Answer now using only the tool results above. Do not call tools.' }]), /latest tool result/)
+})
+
+test('lists state shared values once, use dotted nested keys, cap long text and go lean before dropping items', () => {
+  const items = Array.from({ length: 30 }, (_, i) => ({ id: 1000 + i, name: `repo-${i}`, owner: { login: 'someone' }, archived: false, private: i % 2 === 0, stars: i % 3, description: `About repo ${i} `.repeat(10) + 'y'.repeat(400), html_url: `https://example.org/repo-${i}` }))
+  const output = compactConnectorResult({ data: items, successful: true }, 'List repositories')
+  assert.match(output, /^Same for every item: owner\.login: someone; archived: false$/m)
+  const rows = output.split('\n').filter((line) => line.startsWith('- '))
+  assert.ok(rows.length >= 10, String(rows.length))
+  assert.ok(output.length <= TOOL_RESULT_CHARS)
+  assert.match(output, new RegExp(`Total items 30, shown ${rows.length}`))
+  for (const row of rows) {
+    assert.ok(!/(?:^|; )(?:id|private|archived|owner\.login): /.test(row.slice(2)), row)
+    assert.ok(!row.includes('y'.repeat(300)), 'long text is capped')
+    assert.match(row, /name: repo-\d+; .*html_url: https:\/\/example\.org\/repo-\d+/)
+  }
+  const short = compactConnectorResult({ data: [{ id: 7, name: 'a', private: true }, { id: 8, name: 'b', private: false }], successful: true }, 'List')
+  assert.match(short, /- id: 7; name: a; private: true/)
+})
+
+test('a plain read naming one connected app is searched before generation; writes and ambiguity are left to the model', () => {
+  assert.equal(readTarget('list my GitHub repos', ['github', 'gmail']), 'github')
+  assert.equal(readTarget('show my latest Gmail emails', ['github', 'gmail']), 'gmail')
+  assert.equal(readTarget('list my GitHub repos', ['gmail']), undefined)
+  assert.equal(readTarget('create a GitHub issue', ['github']), undefined)
+  assert.equal(readTarget('list my repos and delete the oldest on GitHub', ['github']), undefined)
+  assert.equal(readTarget('compare my GitHub repos with my Gmail', ['github', 'gmail']), undefined)
+  assert.ok(plainReadIntent('list my GitHub repos'))
+  assert.ok(!plainReadIntent('send an email'))
 })

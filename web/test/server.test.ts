@@ -158,7 +158,13 @@ test('SSRF guard rejects loopback/private/metadata/localhost and encoded IP vari
 test('huge execution results stay valid JSON and bounded with omission notes', () => {
   const result = compact({ ok: true, executed: true, data: { records: Array.from({ length: 500 }, () => ({ title: 'long'.repeat(5000), nested: [1, 2, 3] })) } })
   const text = JSON.stringify(result)
-  assert.ok(text.length <= 5200, String(text.length)); assert.ok(JSON.parse(text)); assert.match(text, /omitted/)
+  assert.ok(text.length <= 60000, String(text.length)); assert.ok(JSON.parse(text)); assert.match(text, /omitted/)
+})
+test('ordinary list results reach the browser complete, so counts are never guessed', () => {
+  const repos = Array.from({ length: 31 }, (_, i) => Object.fromEntries([['name', `repo-${i}`], ...Array.from({ length: 30 }, (_, k) => [`field${k}`, k])]))
+  const result = compact({ ok: true, executed: true, data: repos }) as { data: Record<string, unknown>[] }
+  assert.equal(result.data.length, 31)
+  assert.ok(result.data.every((repo, i) => repo.name === `repo-${i}` && repo.field29 === 29 && !('_note' in repo)))
 })
 
 test('reader extracts plain text from HTML and rejects redirects to private targets, non-HTML and oversized pages', async (t) => {

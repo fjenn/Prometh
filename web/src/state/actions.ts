@@ -10,7 +10,7 @@ import { checkImagePrompt, signals } from '../engine/prompt-gate'
 import { capture, MicBlockedError, player, type Capture, type CaptureOptions } from '../engine/audio'
 import { clearBlobs, deleteBlob, putBlob } from '../engine/blobs'
 import { getConnections, getHealth } from '../engine/api'
-import { createToolRuntime, hideToolMarkup, runToolLoop, schemas, type Turn } from '../engine/tools'
+import { createToolRuntime, hideToolMarkup, readTarget, runToolLoop, schemas, type Turn } from '../engine/tools'
 import { needsWeb, searchQuery } from '../engine/search'
 import { requestApproval } from './approvals'
 
@@ -348,13 +348,16 @@ async function runChat(chatId: string, opts: { voice?: boolean; onText?: (full: 
     const connected = Object.entries(connections.statuses).filter(([, status]) => status === 'connected').map(([slug]) => slug)
     const search = app.get().webSearch && health.search
     const tools = schemas(search, connected)
+    const lastUser = [...c.messages].reverse().find((m) => m.role === 'user')?.text ?? ''
     const runtime = createToolRuntime({
       signal: ac.signal,
+      request: lastUser,
       onActivity: (toolActivity) => updateMessage(chatId, msg.id, (m) => ({ ...m, toolActivity })),
       onSources: (sources) => updateMessage(chatId, msg.id, (m) => ({ ...m, sources })),
       getAllowed: () => app.get().alwaysAllowed,
       approve: (request) => requestApproval(chatId, msg.id, request, ac.signal),
     })
+    const readApp = readTarget(lastUser, connected)
     const { messages, maxTokens } = buildMessages({ ...c, messages: c.messages }, !!opts.voice, tools.length > 0)
     const outputTokens = tools.length ? Math.min(maxTokens, opts.voice ? 300 : 850) : maxTokens
     const publish = (text: string) => {
@@ -368,11 +371,11 @@ async function runChat(chatId: string, opts: { voice?: boolean; onText?: (full: 
         lastLen = spoken.length
       }
     }
-    const lastUser = [...c.messages].reverse().find((m) => m.role === 'user')?.text ?? ''
     const result = await runToolLoop({
       messages: messages as Turn[], tools, reserveTokens: outputTokens, signal: ac.signal, execute: runtime.execute,
       hasSources: runtime.hasSources,
-      ...(search && needsWeb(lastUser) ? { prefetch: () => runtime.search(searchQuery(lastUser)) } : {}),
+      ...(readApp ? { prefetch: () => runtime.execute({ name: 'connectors_search', arguments: { query: lastUser.slice(0, 300), toolkit: readApp } }) }
+        : search && needsWeb(lastUser) ? { prefetch: () => runtime.search(searchQuery(lastUser)) } : {}),
       onText: publish,
       generate: async (turns, onText) => {
         const output = await streamChat(model, turns, (text) => {

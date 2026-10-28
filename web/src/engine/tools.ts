@@ -1,7 +1,7 @@
 import { jsonrepair } from 'jsonrepair'
 import { api } from './api.ts'
 import type { ConnectorTool } from './api.ts'
-import { actionName, appName, classify, decision, declinedPayload, toolkitFrom } from './connector-policy.ts'
+import { actionName, appName, classify, decision, declinedPayload, readVerbs, toolkitFrom, writeVerbs } from './connector-policy.ts'
 import { citationRules, indexedHits, preferDistinctDomains, promptNote } from './search.ts'
 import type { Source, SearchResult } from './search.ts'
 
@@ -97,6 +97,82 @@ export function boundedJSON(value: unknown, maxChars = TOOL_RESULT_CHARS): strin
   }
   return JSON.stringify({ result: walk(value), _note: `${omitted} fields/items omitted to fit context` })
 }
+/** Successful connector data is prose, bounded at complete fields/items rather than JSON slices. */
+export function compactConnectorResult(result: Record<string, unknown>, name: string, maxChars = TOOL_RESULT_CHARS): string {
+  // Preserve control/error payloads verbatim: consent handling and the model rely on their shape.
+  if (result.ok === false || result.successful === false || result.executed === false || result.error) return boundedJSON(result, maxChars)
+  const clean = (value: unknown, depth = 0): unknown => {
+    if (value == null || value === '') return undefined
+    if (typeof value === 'string') {
+      if (/https?:\/\/\S+/i.test(value) && value.includes('{') && value.includes('}')) return undefined
+      try { if (new URL(value).hostname.toLowerCase().startsWith('api.')) return undefined } catch { /* ordinary text */ }
+      const text = value.replace(/\s+/g, ' ').trim()
+      return text.length > 300 ? text.slice(0, 299) + '…' : text || undefined
+    }
+    if (typeof value !== 'object') return value
+    if (depth > 3) return undefined
+    if (Array.isArray(value)) {
+      const items = value.map((item) => clean(item, depth + 1))
+      // Keep positions for truthful counts even when an empty item has no displayable facts.
+      return items.some((item) => item !== undefined) ? items : undefined
+    }
+    const entries = Object.entries(value).map(([key, item]) => [key, clean(item, depth + 1)] as const)
+      .filter(([, item]) => item !== undefined && !(Array.isArray(item) && !item.length))
+    return entries.length ? Object.fromEntries(entries) : undefined
+  }
+  const data = 'data' in result && 'successful' in result ? result.data : result
+  const value = clean(data)
+  // Nested fields read as dotted keys ("owner.login: x") so values are never ambiguous.
+  const flatten = (item: unknown, prefix = '', out: Record<string, string> = {}) => {
+    if (item && typeof item === 'object' && !Array.isArray(item)) for (const [key, val] of Object.entries(item)) flatten(val, prefix ? `${prefix}.${key}` : key, out)
+    else if (item !== undefined) out[prefix] = Array.isArray(item) ? item.filter((v) => v !== undefined).map((v) => v && typeof v === 'object' ? inline(v) : String(v)).join(', ') : String(item)
+    return out
+  }
+  const fields = (flat: Record<string, string>) => Object.entries(flat).map(([key, val]) => key ? `${key}: ${val}` : val).join('; ')
+  const inline = (item: unknown): string => fields(flatten(item))
+  const lines = [`Result of ${name}. State only facts present below.`]
+  const add = (line: string, reserved = 0) => {
+    if (lines.join('\n').length + line.length + 1 + reserved > maxChars) return false
+    lines.push(line)
+    return true
+  }
+  const render = (item: unknown, path = '') => {
+    if (Array.isArray(item)) {
+      const present = item.filter((entry) => entry !== undefined), flat = present.map((entry) => flatten(entry))
+      // Values shared by every item are stated once, leaving room for more items and less to misread.
+      const common = present.length > 1 && present.every((entry) => entry && typeof entry === 'object' && !Array.isArray(entry))
+        ? Object.keys(flat[0]).filter((key) => key && flat.every((f) => f[key] === flat[0][key])) : []
+      const row = (f: Record<string, string>, lean: boolean) => '- ' + fields(Object.fromEntries(Object.entries(f).filter(([key, val]) => !common.includes(key)
+        // When a list overflows, drop per-item flags, zero counts and numeric internal ids before dropping whole items.
+        && !(lean && (val === 'true' || val === 'false' || val === '0' || (/(?:^|[._])id$/i.test(key) && /^\d+$/.test(val)))))))
+      const full = flat.map((f) => row(f, false))
+      const rows = full.join('\n').length + lines.join('\n').length + 200 > maxChars ? flat.map((f) => row(f, true)) : full
+      let shown = 0
+      const header = lines.length
+      // Reserve the widest possible count footer before adding any complete row.
+      const footer = `Showing ${item.length} of ${item.length} items.`
+      if (!add(`${path ? path + ': ' : ''}Total items ${item.length}, shown 0`, footer.length + 1)) return
+      if (common.length && !add('Same for every item: ' + fields(Object.fromEntries(common.map((key) => [key, flat[0][key]]))), footer.length + 1)) return
+      for (const row of rows) {
+        const nextHeader = `${path ? path + ': ' : ''}Total items ${item.length}, shown ${shown + 1}`
+        if (!add(row, footer.length + 1 + nextHeader.length - lines[header].length)) break
+        lines[header] = nextHeader
+        shown++
+      }
+      if (shown < item.length) add(`Showing ${shown} of ${item.length} items.`)
+    } else if (item && typeof item === 'object') {
+      for (const [key, val] of Object.entries(item)) render(val, path ? `${path}.${key}` : key)
+    } else if (item !== undefined) add(path ? `${path}: ${inline(item)}` : inline(item))
+  }
+  render(value)
+  return lines.join('\n')
+}
+const CONTINUE_TOOLS = 'Continue: make the tool call now.'
+const ANSWER_NOW = 'Answer now using only the tool results above. Do not call tools.'
+const isLoopInstruction = (turn: Turn) => turn.role === 'user' && [CONTINUE_TOOLS, ANSWER_NOW].includes(turn.content)
+// Only an announcement, optionally preceded by an acknowledgement/found-tool sentence.
+// Numbers, lists, or further sentences may contain an answer, so leave those alone.
+const announcesAction = (text: string) => text.length < 400 && !/[\n\d]/.test(text) && /^(?:(?:great|sure|okay|ok)[,!.:\s]+)?(?:i (?:found|have found) [^.!?]+[.!]\s*)?(?:let me|i'll|i will|i'm going to|now i'll|one moment)\b[^.!?]*[.!]?$/i.test(text)
 const tokens = (s: string) => Math.ceil(s.length / 3.0) + 8
 /** Re-budget every step, reserving space for generation; keep the latest user request and latest result. */
 export function budgetTurns(turns: Turn[], reserve = 850): Turn[] {
@@ -105,7 +181,8 @@ export function budgetTurns(turns: Turn[], reserve = 850): Turn[] {
   if (budget < 300) throw new Error('Enabled skills and tools exceed the model context. Shorten your skills and try again.')
   // Pin the actual question even after several large responses have displaced older history.
   let question = -1
-  for (let i = turns.length - 1; i > 0; i--) if (turns[i].role === 'user' && !isToolResponse(turns[i])) { question = i; break }
+  for (let i = turns.length - 1; i > 0; i--) if (turns[i].role === 'user' && !isToolResponse(turns[i]) && !isLoopInstruction(turns[i])) { question = i; break }
+  const latestResult = turns.findLastIndex(isToolResponse)
   const hasToolResults = turns.some(isToolResponse)
   const pinned = question >= 0 ? { ...turns[question], content: turns[question].content.slice(-Math.min(hasToolResults ? 2400 : Infinity, Math.max(1, (budget - 80) * 3))) } : null
   if (pinned) budget -= tokens(pinned.content)
@@ -117,7 +194,7 @@ export function budgetTurns(turns: Turn[], reserve = 850): Turn[] {
     const cost = tokens(turn.content)
     if (cost > budget) {
       // Never cut through tool JSON; if the latest result cannot fit, explain how to recover.
-      if (i === turns.length - 1 && isToolResponse(turn)) throw new Error('The latest tool result and enabled skills exceed the model context. Shorten your skills and try again.')
+      if (i === latestResult) throw new Error('The latest tool result and enabled skills exceed the model context. Shorten your skills and try again.')
       continue
     }
     history.push({ index: i, turn }); budget -= cost
@@ -137,6 +214,11 @@ export async function runToolLoop(options: {
 }) {
   const turns = options.messages.map((m) => ({ ...m }))
   const base = turns[0].content
+  let nudged = false
+  const executed = new Set<string>()
+  // Object key order is irrelevant to JSON equality; array order remains significant.
+  const canonicalJSON = (value: unknown): string => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, item[key]])) : item)
   if (options.prefetch) {
     let result: string
     try { result = await options.prefetch() } catch (error) {
@@ -148,20 +230,38 @@ export async function runToolLoop(options: {
   for (let step = 0; step <= 4; step++) {
     options.signal.throwIfAborted()
     const tools = step < 4 ? options.tools : []
-    const system = base + (options.hasSources?.() ? '\n\n' + citationRules : '') + (step === 4 ? '\nAnswer now from the available results. No more tool calls.' : '')
+    const system = base + (options.hasSources?.() ? '\n\n' + citationRules : '')
     turns[0] = { role: 'system', content: tools.length ? toolsBlock(tools) + (system.trim() ? '\n\n' + system.trim() : '') : system }
+    if (step === 4) turns.push({ role: 'user', content: ANSWER_NOW })
     const result = await options.generate(budgetTurns(turns, options.reserveTokens ?? 850), (text) => options.onText(hideToolMarkup(text)))
     if (result.stopped || options.signal.aborted) return { ...result, text: hideToolMarkup(result.text) }
     const calls = parseToolCalls(result.text)
+    if (step === 4) {
+      const text = hideToolMarkup(result.text).trim()
+      if (text) return { ...result, text }
+      turns.push({ role: 'assistant', content: result.text }, { role: 'user', content: ANSWER_NOW })
+      options.onText('')
+      options.signal.throwIfAborted()
+      const retry = await options.generate(budgetTurns(turns, options.reserveTokens ?? 850), (text) => options.onText(hideToolMarkup(text)))
+      const visible = hideToolMarkup(retry.text).trim()
+      return { ...retry, text: retry.stopped || options.signal.aborted ? visible : visible || 'I could not finish this request within the tool limit. Please try a narrower request.' }
+    }
+    if (!calls.length && tools.length && !nudged && announcesAction(hideToolMarkup(result.text).trim()) && !/<tool_call>/i.test(result.text)) {
+      nudged = true
+      turns.push({ role: 'assistant', content: result.text }, { role: 'user', content: CONTINUE_TOOLS })
+      options.onText('')
+      continue
+    }
     if (!calls.length && !/<tool_call>/i.test(result.text)) return { ...result, text: hideToolMarkup(result.text) }
-    if (step === 4) return { ...result, text: hideToolMarkup(result.text).trim() || 'I could not finish this request within the tool limit. Please try a narrower request.' }
     // One action per step avoids parallel writes and keeps consent tied to one visible card.
     const call = calls[0]
     let response = '{"ok":false,"error":"Invalid tool call. Nest a function block with required parameter blocks inside tool_call."}'
     if (call) {
       if (!tools.some((t) => t.name === call.name)) response = '{"ok":false,"error":"Tool is unavailable."}'
       else {
-        try { response = await options.execute(call) } catch (error) {
+        const key = canonicalJSON(call)
+        if (executed.has(key)) response = '{"ok":false,"error":"Already done; the result is above. Answer now or use a different action."}'
+        else try { executed.add(key); response = await options.execute(call) } catch (error) {
           options.signal.throwIfAborted()
           response = JSON.stringify({ ok: false, error: error instanceof Error ? error.message : 'Tool failed.' })
         }
@@ -205,11 +305,37 @@ export function compactSchema(value: unknown): unknown {
     return [key, val]
   }))
 }
+/** A request that only reads (e.g. "list my repos"): at least one read verb and no write verb. */
+export function plainReadIntent(request: string) {
+  const words = request.toUpperCase().match(/\b[A-Z]+\b/g) ?? []
+  return words.some((word) => readVerbs.has(word)) && !words.some((word) => writeVerbs.has(word))
+}
+/** The connected app a plain read names, so its catalog search can run before generation instead of relying on the model to start it. */
+export function readTarget(request: string, connected: string[]) {
+  if (!plainReadIntent(request)) return undefined
+  const words = new Set(request.toLowerCase().match(/[a-z0-9]+/g) ?? [])
+  const named = connected.filter((slug) => words.has(slug.toLowerCase()) || words.has(appName(slug).toLowerCase()))
+  return named.length === 1 ? named[0] : undefined
+}
 export function createToolRuntime(options: {
   signal: AbortSignal; onActivity: (text?: string) => void; onSources: (sources: Source[]) => void
   getAllowed: () => string[]; approve: (request: ApprovalRequest) => Promise<Consent>
+  request?: string
 }) {
   const sources: Source[] = [], hints = new Map<string, ConnectorTool>()
+  let autoExecuted = false
+  const plainRead = plainReadIntent(options.request ?? '')
+  const runAction = async (tool: string, args: Record<string, unknown>, hint: ConnectorTool) => {
+    options.onActivity(`Using ${appName(toolkitFrom(tool, hint.toolkit))}…`)
+    return runConnectorAction({ tool, arguments: args, hint, keys: options.getAllowed(), approve: options.approve,
+      execute: async (approved) => {
+        options.onActivity(`Using ${appName(toolkitFrom(tool, hint.toolkit))}…`)
+        // Approval-required is data, so the UI can retry after user consent.
+        const response = await fetch('/api/connectors/tools/execute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tool, arguments: args, approved }), signal: options.signal })
+        return response.json()
+      },
+    })
+  }
   const search = async (query: string) => {
     options.onActivity('Searching the web…')
     try {
@@ -244,6 +370,24 @@ export function createToolRuntime(options: {
         options.onActivity('Finding connected-app actions…')
         const result = await api<{ items: ConnectorTool[] }>('connectors/tools/search', args, options.signal)
         for (const item of result.items) hints.set(item.slug.toUpperCase(), item)
+        const top = result.items[0]
+        if (plainRead && !autoExecuted && top && classify(top.slug, top.tags) === 'read' && (!Array.isArray(top.input_parameters.required) || top.input_parameters.required.length === 0)) {
+          autoExecuted = true
+          const tool = top.slug.toUpperCase(), name = actionName(tool, top)
+          const otherActions: { slug: string; name: string }[] = []
+          for (const item of result.items.slice(1)) {
+            const action = { slug: item.slug, name: actionName(item.slug, item) }
+            if (JSON.stringify([...otherActions, action]).length > 1000) break
+            otherActions.push(action)
+          }
+          // Reserve space for the alternatives; all hints remain registered, including omitted schemas.
+          const suffix = '\nother_actions: ' + JSON.stringify(otherActions)
+          const executed = await runAction(tool, {}, top)
+          // Error/approval payloads retain the same shape as explicit execution.
+          if (executed.ok === false || (executed as Record<string, unknown>).successful === false || executed.executed === false || executed.error) return compactConnectorResult(executed, name)
+          const execution = `\nExecuted ${tool} (${name}).`
+          return compactConnectorResult(executed, name, TOOL_RESULT_CHARS - execution.length - suffix.length) + execution + suffix
+        }
         // Keep complete schemas. A large schema is explicitly rejected instead of silently losing required fields.
         const items: ConnectorTool[] = []
         for (const raw of result.items) {
@@ -256,16 +400,8 @@ export function createToolRuntime(options: {
       if (!/^[A-Z0-9_]+$/.test(tool) || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) return '{"ok":false,"executed":false,"error":"Invalid tool or arguments"}'
       const hint = hints.get(tool)
       if (hint === undefined) return '{"ok":false,"executed":false,"error":"Unknown action slug. Use an exact slug returned by connectors_search, or search again."}'
-      options.onActivity(`Using ${appName(toolkitFrom(tool, hint?.toolkit))}…`)
-      const result = await runConnectorAction({ tool, arguments: args.arguments as Record<string, unknown>, hint, keys: options.getAllowed(), approve: options.approve,
-        execute: async (approved) => {
-          options.onActivity(`Using ${appName(toolkitFrom(tool, hint?.toolkit))}…`)
-          // Approval-required is data, so the UI can retry after user consent.
-          const response = await fetch('/api/connectors/tools/execute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tool, arguments: args.arguments, approved }), signal: options.signal })
-          return response.json()
-        },
-      })
-      return boundedJSON(result)
+      const result = await runAction(tool, args.arguments as Record<string, unknown>, hint)
+      return compactConnectorResult(result, actionName(tool, hint))
     } finally { options.onActivity(undefined) }
   }
   return { search, execute, hasSources: () => sources.length > 0 }

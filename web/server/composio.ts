@@ -122,14 +122,15 @@ export async function executeTool(key: string, user: string, tool: string, args:
   return { ...result, ok: result.successful !== false, executed: true }
 }
 /** A bounded JSON tree, retaining useful fields and explicit omission counts. */
-export function compact(value: unknown, max = 5200): unknown {
+// Generous bounds: the browser compacts again to fit the model context, so lists stay complete and counts truthful.
+export function compact(value: unknown, max = 60000): unknown {
   const shrink = (v: unknown, depth = 0): unknown => {
     if (typeof v === 'string') return v.length > 900 ? v.slice(0, 899) + '…' : v
     if (depth > 7 && v && typeof v === 'object') return '[nested data omitted]'
-    if (Array.isArray(v)) return [...v.slice(0, 6).map((x) => shrink(x, depth + 1)), ...(v.length > 6 ? [{ _note: `${v.length - 6} items omitted` }] : [])]
+    if (Array.isArray(v)) return [...v.slice(0, 100).map((x) => shrink(x, depth + 1)), ...(v.length > 100 ? [{ _note: `${v.length - 100} items omitted` }] : [])]
     if (v && typeof v === 'object') {
       const entries = Object.entries(v)
-      return { ...Object.fromEntries(entries.slice(0, 24).map(([k, x]) => [k, shrink(x, depth + 1)])), ...(entries.length > 24 ? { _note: `${entries.length - 24} fields omitted` } : {}) }
+      return { ...Object.fromEntries(entries.slice(0, 80).map(([k, x]) => [k, shrink(x, depth + 1)])), ...(entries.length > 80 ? { _note: `${entries.length - 80} fields omitted` } : {}) }
     }
     return v
   }
