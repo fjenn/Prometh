@@ -3,3 +3,6 @@ dist/
 *.tsbuildinfo
 diag/
 public/ort/
+
+.smoke/
+.prometh-logs/

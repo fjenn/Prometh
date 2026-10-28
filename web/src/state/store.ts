@@ -32,6 +32,8 @@ export function freshSnapshot(): Snapshot {
     defaultMode: 'safe',
     appearance: 'Light',
     readAttachments: true,
+    webSearch: true,
+    alwaysAllowed: [],
     chats: [],
     selectedChatId: null,
     skills: [],
@@ -51,7 +53,11 @@ export function load(): Snapshot {
       if (p && (p.status === 'preparing' || p.status === 'downloading' || p.status === 'checking')) s.preps[k] = { ...p, status: 'queued' }
     }
     for (const c of s.chats) {
-      for (const m of c.messages) if (m.status === 'streaming' || m.status === 'preparing') m.status = 'stopped'
+      for (const m of c.messages) {
+        if (m.status === 'streaming' || m.status === 'preparing') m.status = 'stopped'
+        m.toolActivity = undefined
+        if (m.approval && !m.approval.resolution) m.approval.resolution = 'cancelled'
+      }
     }
     return s
   } catch {
@@ -82,7 +88,7 @@ window.addEventListener('beforeunload', () => {
   }
 })
 
-export type SettingsTab = 'Appearance' | 'Capabilities' | 'Turbo' | 'Privacy & data'
+export type SettingsTab = 'Appearance' | 'Capabilities' | 'Turbo' | 'Customize' | 'Privacy & data'
 export type CustomizeSection = 'Plugins' | 'Tools' | 'Skills'
 export type VoicePhase = 'Listening' | 'Hearing you' | 'Thinking' | 'Speaking' | 'Muted' | 'Microphone blocked' | 'Getting ready'
 

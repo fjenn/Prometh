@@ -31,6 +31,9 @@ import { activeLLM } from '../engine/prep'
 import { Icon, IconButton } from './Icon'
 import { Confirm, MenuButton, Sheet, type MenuItem } from './Overlay'
 import { Markdown } from './Markdown'
+import { citedLinks } from '../engine/search'
+import { resolveApproval } from '../state/approvals'
+import { ToolkitLogo } from './Settings'
 import { ArtifactCard, AttachmentChip, ImageJob, VideoNote } from './Media'
 import { Brand } from './Onboarding'
 
@@ -261,12 +264,23 @@ function AssistantMessage({ m, chat, last }: { m: Message; chat: Conversation; l
       ) : m.status === 'failed' ? (
         <div className="failed">{m.text}</div>
       ) : text ? (
-        <Markdown text={text} streaming={m.status === 'streaming' || revealed !== null} />
+        <Markdown text={text} sources={m.sources} streaming={m.status === 'streaming' || revealed !== null} />
       ) : m.status === 'streaming' || revealed !== null ? (
         <div className="md">
           <span className="caret" />
         </div>
       ) : null}
+      {m.toolActivity && <div className="muted" role="status" style={{ fontSize: 12 }}>{m.toolActivity}</div>}
+      {m.approval && <div className="tile" role="group" aria-label="Connected-app approval" style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}><ToolkitLogo logo={m.approval.logo} name={m.approval.name} /><div><div style={{ fontWeight: 500 }}>{m.approval.action}</div><div className="muted" style={{ fontSize: 12 }}>{m.approval.name}</div></div></div>
+        {m.approval.detail && <div className="muted" style={{ fontSize: 12 }}>{m.approval.detail}</div>}
+        {m.approval.resolution ? <div className="muted" style={{ fontSize: 12 }}>{m.approval.resolution === 'decline' ? 'Not allowed' : m.approval.resolution === 'cancelled' ? 'Cancelled' : m.approval.resolution === 'always' ? 'Always allowed' : 'Allowed once'}</div> : <div className="acts">
+          <button className="btn btn-bordered" onClick={() => resolveApproval(chat.id, m.id, m.approval!.id, 'once')}>Allow once</button>
+          <button className="btn btn-bordered" onClick={() => resolveApproval(chat.id, m.id, m.approval!.id, 'always')}>Always allow</button>
+          <button className="btn btn-plain" onClick={() => resolveApproval(chat.id, m.id, m.approval!.id, 'decline')}>Don't allow</button>
+        </div>}
+      </div>}
+      {!!citedLinks(m.sources, text).length && <div className="muted" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', fontSize: 11, marginTop: 10 }}>Sources {citedLinks(m.sources, text).map((source) => <a className="pill" style={{ textDecoration: 'none', color: 'inherit' }} key={source.index} href={source.url} target="_blank" rel="noopener noreferrer">[{source.index}] {source.title}</a>)}</div>}
       {m.artifact && <ArtifactCard artifact={m.artifact} />}
       {m.skills && m.skills.length > 0 && <div className="faint" style={{ fontSize: 10 }}>Skills: {m.skills.join(', ')}</div>}
       {!busy && m.jobKind !== 'video' && (

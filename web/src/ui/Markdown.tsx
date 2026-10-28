@@ -1,14 +1,16 @@
-import { useState, type ReactNode } from 'react'
+import { createContext, useContext, useState, type ReactNode } from 'react'
+import type { Source } from '../engine/search'
+const Sources = createContext<Source[]>([])
 
 /**
  * Small markdown renderer that builds React elements (never raw HTML), so model
  * output can't inject markup. Covers what chat replies use: fenced code, headings,
  * lists, quotes, rules, tables, bold/italic/code/links, and <think> blocks.
  */
-export function Markdown({ text, streaming }: { text: string; streaming?: boolean }) {
+export function Markdown({ text, streaming, sources = [] }: { text: string; streaming?: boolean; sources?: Source[] }) {
   const { think, body, thinking } = splitThink(text)
   return (
-    <div className={streaming ? 'md streaming' : 'md'}>
+    <Sources.Provider value={sources}><div className={streaming ? 'md streaming' : 'md'}>
       {think.trim() && (
         <details open={thinking}>
           <summary>{thinking ? 'Thinking…' : 'Thought process'}</summary>
@@ -16,7 +18,7 @@ export function Markdown({ text, streaming }: { text: string; streaming?: boolea
         </details>
       )}
       {blocks(body)}
-    </div>
+    </div></Sources.Provider>
   )
 }
 
@@ -139,7 +141,7 @@ function blocks(src: string): ReactNode[] {
 
 function inline(text: string): ReactNode[] {
   const out: ReactNode[] = []
-  const re = /(`[^`]+`)|(\*\*[^*]+\*\*|__[^_]+__)|(\*[^*\s][^*]*\*|_[^_\s][^_]*_)|(\[[^\]]+\]\((https?:\/\/[^)\s]+)\))/g
+  const re = /(`[^`]+`)|(\*\*[^*]+\*\*|__[^_]+__)|(\*[^*\s][^*]*\*|_[^_\s][^_]*_)|(\[[^\]]+\]\((https?:\/\/[^)\s]+)\))|(\[\d+\](?!\())/g
   let last = 0
   let m: RegExpExecArray | null
   let k = 0
@@ -157,8 +159,14 @@ function inline(text: string): ReactNode[] {
         </a>,
       )
     }
+    else if (m[6]) out.push(<Citation key={k++} index={Number(t.slice(1, -1))} />)
     last = m.index + t.length
   }
   if (last < text.length) out.push(text.slice(last))
   return out
+}
+
+function Citation({ index }: { index: number }) {
+  const source = useContext(Sources).find((s) => s.index === index)
+  return source ? <a className="pill" style={{ fontSize: 10, padding: '1px 5px', verticalAlign: 'super', textDecoration: 'none' }} href={source.url} title={source.title} target="_blank" rel="noopener noreferrer">{index}</a> : <>{`[${index}]`}</>
 }

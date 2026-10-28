@@ -9,8 +9,10 @@ import { addCapability, cancelUpgrade, deleteDownloads, deleteSkill, exportChat,
 import { Icon, IconButton } from './Icon'
 import { Confirm, Sheet } from './Overlay'
 import { Brand, PrepRow } from './Onboarding'
+import { api, getCatalog, getConnections, getHealth, type ConnectionStatus, type Toolkit } from '../engine/api'
+import { resetAllowed } from '../engine/connector-policy'
 
-const TABS: SettingsTab[] = ['Appearance', 'Capabilities', 'Turbo', 'Privacy & data']
+const TABS: SettingsTab[] = ['Appearance', 'Capabilities', 'Turbo', 'Customize', 'Privacy & data']
 
 export function Settings() {
   const tab = useUI((s) => s.settingsTab)
@@ -35,7 +37,7 @@ export function Settings() {
           <h2>{tab}</h2>
           <IconButton icon="x" title="Close settings" onClick={close} />
         </header>
-        <div className="scroll">{tab === 'Appearance' ? <Appearance /> : tab === 'Capabilities' ? <Capabilities /> : tab === 'Turbo' ? <Turbo /> : <Privacy />}</div>
+        <div className="scroll">{tab === 'Appearance' ? <Appearance /> : tab === 'Capabilities' ? <Capabilities /> : tab === 'Turbo' ? <Turbo /> : tab === 'Customize' ? <CustomizeBody /> : <Privacy />}</div>
       </section>
     </Sheet>
   )
@@ -148,7 +150,7 @@ function Capabilities() {
         </div>
       )}
       <div className="muted" style={{ fontSize: 11, lineHeight: 1.5 }}>
-        Models download once from Hugging Face and stay in this browser’s storage. Your conversations never leave this device.
+        Models download once from Hugging Face and stay in this browser’s storage. Chat generation stays on this device; enabled web and plugin tools send their requests to the backend.
       </div>
     </>
   )
@@ -373,7 +375,7 @@ function Privacy() {
     <>
       <div style={{ fontWeight: 600 }}>Your data stays on this device.</div>
       <div className="muted" style={{ lineHeight: 1.55 }}>
-        No product account. The AI runs on your own graphics card inside this browser: your messages, images and voice never go to a server. Chats, skills and settings are stored in this browser only.
+        No product account. The AI runs on your own graphics card inside this browser: chat, image and voice generation stay on your device. Web searches, page reads and connected-app actions use the backend and their providers. Chats, skills and settings are stored in this browser only.
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
         <button className="btn btn-bordered" onClick={() => exportChat()}>
@@ -416,15 +418,7 @@ function Privacy() {
 
 // ---------- Customize ----------
 
-const PROVIDERS = [
-  ['gmail', 'Gmail', 'Read selected messages and draft replies'],
-  ['outlook', 'Outlook', 'Read selected messages and draft replies'],
-  ['drive', 'Google Drive', 'Find and read selected documents'],
-  ['github', 'GitHub', 'Read selected repositories and issues'],
-] as const
-
 export function Customize() {
-  const section = useUI((s) => s.customizeSection)
   const close = () => ui.set({ customizeOpen: false })
   return (
     <Sheet onClose={close} width={720} label="Customize">
@@ -438,6 +432,15 @@ export function Customize() {
           </div>
           <IconButton icon="x" title="Close Customize" onClick={close} />
         </div>
+        <CustomizeBody />
+      </div>
+    </Sheet>
+  )
+}
+
+function CustomizeBody() {
+  const section = useUI((s) => s.customizeSection)
+  return <>
         <div className="seg" role="tablist" style={{ alignSelf: 'flex-start' }}>
           {(['Plugins', 'Tools', 'Skills'] as const).map((s) => (
             <button key={s} role="tab" aria-selected={section === s} className={section === s ? 'on' : ''} onClick={() => ui.set({ customizeSection: s })}>
@@ -446,43 +449,114 @@ export function Customize() {
           ))}
         </div>
         <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 18 }}>{section === 'Plugins' ? <Plugins /> : section === 'Tools' ? <Tools /> : <Skills />}</div>
-      </div>
-    </Sheet>
-  )
+  </>
+}
+
+export function ToolkitLogo({ logo, name }: { logo?: string; name: string }) {
+  const [failed, setFailed] = useState(false)
+  const style = { width: 30, height: 30, borderRadius: 8, objectFit: 'contain' as const, flexShrink: 0 }
+  return logo && !failed ? <img loading="lazy" referrerPolicy="no-referrer" src={logo} alt="" style={style} onError={() => setFailed(true)} /> : <span className="pill" aria-hidden="true" style={{ ...style, justifyContent: 'center' }}>{name[0]?.toUpperCase()}</span>
 }
 
 function Plugins() {
-  return (
-    <>
-      <div className="muted">Apps your AI can use.</div>
-      <div>
-        {PROVIDERS.map(([id, name, access], i) => (
-          <div key={id} style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '11px 0', borderTop: i ? '1px solid var(--hair)' : undefined }}>
-            <img src={`/img/provider-${id}.webp`} alt="" style={{ width: 25, height: 25, padding: 8, boxSizing: 'content-box', background: '#fff', borderRadius: 10, objectFit: 'contain' }} />
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 500, fontSize: 13 }}>{name}</div>
-              <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>
-                {access}
-              </div>
-            </div>
-            <span className="pill soon">Coming soon</span>
-          </div>
-        ))}
+  const [items, setItems] = useState<Toolkit[]>([])
+  const [statuses, setStatuses] = useState<Record<string, ConnectionStatus>>({})
+  const [configured, setConfigured] = useState<boolean | null>(null)
+  const [query, setQuery] = useState('')
+  const [category, setCategory] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState<Record<string, boolean>>({})
+  const allowed = useApp((s) => s.alwaysAllowed)
+  useEffect(() => {
+    const ac = new AbortController()
+    void (async () => {
+      const health = await getHealth(ac.signal)
+      if (ac.signal.aborted) return
+      setConfigured(health.connectors)
+      if (!health.connectors) return
+      try {
+        const [catalog, connections] = await Promise.all([getCatalog(ac.signal), getConnections(ac.signal)])
+        if (!ac.signal.aborted) { setItems(catalog); setStatuses(connections.statuses) }
+      } catch (e) { if (!ac.signal.aborted) setError((e as Error).message) }
+    })()
+    return () => ac.abort()
+  }, [])
+  // Pending OAuth is persisted by Composio, so reopening the sheet resumes polling.
+  const pending = Object.entries(statuses).filter(([, s]) => s === 'pending').map(([slug]) => slug).sort().join(',')
+  useEffect(() => {
+    if (!pending) return
+    const ac = new AbortController(), until = Date.now() + 120000
+    const timer = window.setInterval(() => {
+      if (Date.now() >= until) { clearInterval(timer); return }
+      void getConnections(ac.signal).then((data) => { if (!ac.signal.aborted) setStatuses(data.statuses) }).catch(() => {})
+    }, 2000)
+    return () => { ac.abort(); clearInterval(timer) }
+  }, [pending])
+  const connect = async (toolkit: string) => {
+    // Open synchronously with the click so browsers allow the OAuth window.
+    const popup = window.open('about:blank', '_blank')
+    if (popup) popup.opener = null
+    setBusy((s) => ({ ...s, [toolkit]: true })); setError('')
+    try {
+      const { redirect_url } = await api<{ redirect_url: string }>('connectors/link', { toolkit })
+      if (popup) popup.location.href = redirect_url
+      else { setError('Allow popups for Prometh, then connect again.'); return }
+      setStatuses((s) => ({ ...s, [toolkit]: 'pending' }))
+    } catch (e) { popup?.close(); setError((e as Error).message) }
+    finally { setBusy((s) => ({ ...s, [toolkit]: false })) }
+  }
+  const disconnect = async (toolkit: string) => {
+    setBusy((s) => ({ ...s, [toolkit]: true })); setError('')
+    try { await api('connectors/disconnect', { toolkit }); setStatuses((s) => ({ ...s, [toolkit]: 'disconnected' })); app.set((s) => ({ alwaysAllowed: resetAllowed(toolkit, s.alwaysAllowed) })) }
+    catch (e) { setError((e as Error).message) }
+    finally { setBusy((s) => ({ ...s, [toolkit]: false })) }
+  }
+  if (configured === null) return <div className="muted">Checking plugins…</div>
+  if (!configured) return <div className="muted">Plugins are unavailable until the backend has Composio configured.</div>
+  const categories = [...new Set(items.flatMap((i) => i.categories))].sort()
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean)
+  const filtered = items.filter((i) => (!category || i.categories.includes(category)) && words.every((w) => [i.name, i.slug, i.description, ...i.categories].join(' ').toLowerCase().includes(w)))
+    .sort((a, b) => Number(statuses[b.slug] === 'connected') - Number(statuses[a.slug] === 'connected') || a.name.localeCompare(b.name))
+  return <>
+    <div className="muted">Apps your AI can use. Writes ask for your permission.</div>
+    <input className="field" aria-label="Search plugins" placeholder="Search apps…" value={query} onChange={(e) => setQuery(e.target.value)} />
+    <select className="field" aria-label="Plugin category" value={category} onChange={(e) => setCategory(e.target.value)}>
+      <option value="">All categories</option>
+      {categories.map((c) => <option key={c}>{c}</option>)}
+    </select>
+    {error && <div className="muted" role="status">{error}</div>}
+    {!items.length && !error && <div className="muted">Loading apps…</div>}
+    {!!items.length && !filtered.length && <div className="muted">No apps match your search.</div>}
+    <div>{filtered.map((item) => {
+      const status = statuses[item.slug] ?? 'disconnected'
+      const hasAllowed = allowed.some((k) => k.toLowerCase().startsWith(item.slug.toLowerCase() + ':'))
+      return <div key={item.slug} style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '11px 0', borderBottom: '1px solid var(--hair)' }}>
+        <ToolkitLogo logo={item.logo} name={item.name} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 500, fontSize: 13 }}>{item.name} {item.no_auth && <span className="muted">· No auth required</span>}</div>
+          <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>{item.description}</div>
+          {hasAllowed && <button className="btn btn-link" onClick={() => app.set((s) => ({ alwaysAllowed: resetAllowed(item.slug, s.alwaysAllowed) }))}>Reset always-allow</button>}
+        </div>
+        {status !== 'disconnected' && <span className={`pill ${status === 'connected' ? 'good' : ''}`}>{status}</span>}
+        <button className="btn btn-bordered" disabled={busy[item.slug]} onClick={() => void (status === 'connected' || status === 'pending' ? disconnect(item.slug) : connect(item.slug))}>
+          {busy[item.slug] ? 'Working…' : status === 'connected' || status === 'pending' ? 'Disconnect' : status === 'expired' ? 'Reconnect' : 'Connect'}
+        </button>
       </div>
-      <div className="muted" style={{ fontSize: 11, lineHeight: 1.5 }}>
-        Connectors arrive with the Prometh Mac app. They’ll ask your permission per app, and the AI that reads your data stays on your device.
-      </div>
-    </>
-  )
+    })}</div>
+    <div className="muted" style={{ fontSize: 11 }}>App requests go through the backend to Composio. Chat generation stays on your device.</div>
+  </>
 }
 
 function Tools() {
   const read = useApp((s) => s.readAttachments)
-  const row = (name: string, detail: string, on: boolean, toggle?: () => void, soon?: boolean) => (
+  const web = useApp((s) => s.webSearch)
+  const [searchAvailable, setSearchAvailable] = useState(false)
+  useEffect(() => { const ac = new AbortController(); void getHealth(ac.signal).then((h) => { if (!ac.signal.aborted) setSearchAvailable(h.search) }); return () => ac.abort() }, [])
+  const row = (name: string, detail: string, on: boolean, toggle?: () => void) => (
     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 24 }}>
       <div style={{ flex: 1 }}>
         <div style={{ fontWeight: 500, fontSize: 15 }}>
-          {name} {soon && <span className="pill soon" style={{ marginLeft: 6 }}>Coming soon</span>}
+          {name}
         </div>
         <div className="muted" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
           {detail}
@@ -496,7 +570,7 @@ function Tools() {
       <div className="muted">What your AI is allowed to do.</div>
       {row('Read attachments', 'Work with text, code and data files you attach. Files are read in this browser, never uploaded.', read, () => app.set({ readAttachments: !read }))}
       <hr style={{ border: 0, borderTop: '1px solid var(--hair)', width: '100%', margin: 0 }} />
-      {row('Web search', 'Find fresh information and include sources in replies.', false, undefined, true)}
+      {row('Web search', searchAvailable ? 'Find fresh information and include sources in replies. Queries and page URLs use the backend.' : 'Unavailable: configure SEARXNG_URL on the backend.', web && searchAvailable, searchAvailable ? () => app.set({ webSearch: !web }) : undefined)}
     </>
   )
 }

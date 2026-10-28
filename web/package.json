@@ -6,20 +6,27 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "typecheck": "tsc -b --noEmit",
+    "typecheck": "tsc -b --noEmit && tsc -p tsconfig.server.json --noEmit",
     "preview": "vite preview",
     "postinstall": "patch-package && node -e \"const fs=require('fs');fs.mkdirSync('public/ort',{recursive:true});for(const x of ['mjs','wasm'])fs.copyFileSync('node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.'+x,'public/ort/ort-wasm-simd-threaded.asyncify.'+x)\"",
-    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts"
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "server": "node server/node.ts",
+    "start": "NODE_ENV=production node server/node.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "4.3.1",
     "@mlc-ai/web-llm": "0.2.84",
+    "@mozilla/readability": "^0.6.0",
+    "jsonrepair": "^3.15.0",
     "kokoro-js": "1.2.1",
+    "linkedom": "^0.18.14",
     "onnxruntime-web": "1.31.0-dev.20260914-8d85527a0",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "undici": "^8.12.3"
   },
   "devDependencies": {
+    "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",

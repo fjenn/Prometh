@@ -9,6 +9,10 @@ import { generateImage, imagesLoaded, releaseImages, speak, transcribe, warmList
 import { checkImagePrompt, signals } from '../engine/prompt-gate'
 import { capture, MicBlockedError, player, type Capture, type CaptureOptions } from '../engine/audio'
 import { clearBlobs, deleteBlob, putBlob } from '../engine/blobs'
+import { getConnections, getHealth } from '../engine/api'
+import { createToolRuntime, hideToolMarkup, readTarget, runToolLoop, schemas, type Turn } from '../engine/tools'
+import { needsWeb, searchQuery } from '../engine/search'
+import { requestApproval } from './approvals'
 
 // ---------- onboarding ----------
 
@@ -273,10 +277,10 @@ function skillsText(skills: Skill[]) {
 const approxTokens = (s: string) => Math.ceil(s.length / 3.6)
 
 /** Build the prompt: system + as much recent history as fits in the 4k context. */
-function buildMessages(c: Conversation, voice: boolean): { messages: ChatCompletionMessageParam[]; maxTokens: number } {
+function buildMessages(c: Conversation, voice: boolean, networkTools = false): { messages: ChatCompletionMessageParam[]; maxTokens: number } {
   const s = app.get()
   const model = activeLLM(c.mode === 'evil' ? 'evil' : 'chat')
-  const about = model ? `\n\nYou are running as ${model.label}, an open model, on the user's own GPU inside their browser (WebGPU), fully offline from any server.` : ''
+  const about = model ? `\n\nYou are running as ${model.label}, an open model, on the user's own GPU inside their browser (WebGPU)${networkTools ? '.' : ', fully offline from any server.'}` : ''
   const system = (c.mode === 'evil' ? SYSTEM_EVIL : SYSTEM_SAFE) + about + skillsText(s.skills) + (voice ? `\n\n${VOICE_HINT}` : '')
   const CONTEXT = 4096
   const reserve = voice ? 300 : 1100
@@ -339,27 +343,55 @@ async function runChat(chatId: string, opts: { voice?: boolean; onText?: (full: 
       await imageBusy
       if (imagesLoaded()) releaseImages()
     }
-    const { messages, maxTokens } = buildMessages({ ...c, messages: c.messages }, !!opts.voice)
-    const result = await streamChat(
-      model,
-      messages,
-      (text) => {
-        if (ac.signal.aborted) return
-        const blocked = isBlocked(text)
-        const vis = visibleReply(text)
-        updateMessage(chatId, msg.id, (m) => ({ ...m, text: blocked ? BLOCKED_MESSAGE : vis }))
-        if (blocked) {
-          ac.abort()
-          return
-        }
-        opts.onText?.(vis, vis.slice(lastLen))
-        lastLen = vis.length
+    const health = await getHealth(ac.signal)
+    const connections = health.connectors ? await getConnections(ac.signal).catch(() => ({ statuses: {} })) : { statuses: {} }
+    const connected = Object.entries(connections.statuses).filter(([, status]) => status === 'connected').map(([slug]) => slug)
+    const search = app.get().webSearch && health.search
+    const tools = schemas(search, connected)
+    const lastUser = [...c.messages].reverse().find((m) => m.role === 'user')?.text ?? ''
+    const runtime = createToolRuntime({
+      signal: ac.signal,
+      request: lastUser,
+      onActivity: (toolActivity) => updateMessage(chatId, msg.id, (m) => ({ ...m, toolActivity })),
+      onSources: (sources) => updateMessage(chatId, msg.id, (m) => ({ ...m, sources })),
+      getAllowed: () => app.get().alwaysAllowed,
+      approve: (request) => requestApproval(chatId, msg.id, request, ac.signal),
+    })
+    const readApp = readTarget(lastUser, connected)
+    const { messages, maxTokens } = buildMessages({ ...c, messages: c.messages }, !!opts.voice, tools.length > 0)
+    const outputTokens = tools.length ? Math.min(maxTokens, opts.voice ? 300 : 850) : maxTokens
+    const publish = (text: string) => {
+      if (ac.signal.aborted) return
+      const vis = visibleReply(hideToolMarkup(text))
+      updateMessage(chatId, msg.id, (m) => ({ ...m, text: vis }))
+      // A tool turn can be replaced by the next turn; speak only a completed final answer when tools are offered.
+      if (!tools.length) {
+        const spoken = plain(vis)
+        opts.onText?.(vis, spoken.slice(lastLen))
+        lastLen = spoken.length
+      }
+    }
+    const result = await runToolLoop({
+      messages: messages as Turn[], tools, reserveTokens: outputTokens, signal: ac.signal, execute: runtime.execute,
+      hasSources: runtime.hasSources,
+      ...(readApp ? { prefetch: () => runtime.execute({ name: 'connectors_search', arguments: { query: lastUser.slice(0, 300), toolkit: readApp } }) }
+        : search && needsWeb(lastUser) ? { prefetch: () => runtime.search(searchQuery(lastUser)) } : {}),
+      onText: publish,
+      generate: async (turns, onText) => {
+        const output = await streamChat(model, turns, (text) => {
+          if (isBlocked(text)) {
+            updateMessage(chatId, msg.id, (m) => ({ ...m, text: BLOCKED_MESSAGE }))
+            ac.abort()
+          } else onText(text)
+        }, { maxTokens: outputTokens, temperature: c.mode === 'evil' ? 0.8 : 0.7, signal: ac.signal })
+        if (isBlocked(output.text)) return { ...output, text: BLOCKED_MESSAGE, stopped: true }
+        return output
       },
-      { maxTokens, temperature: c.mode === 'evil' ? 0.8 : 0.7, signal: ac.signal },
-    )
+    })
     const blocked = isBlocked(result.text)
     const final = blocked ? BLOCKED_MESSAGE : visibleReply(result.text, true).trim()
-    updateMessage(chatId, msg.id, (m) => ({ ...m, text: final, status: ac.signal.aborted || result.stopped ? 'stopped' : 'complete', tps: result.tps }))
+    updateMessage(chatId, msg.id, (m) => ({ ...m, text: final, toolActivity: undefined, status: ac.signal.aborted || result.stopped ? 'stopped' : 'complete', tps: result.tps }))
+    if (tools.length && !blocked && !ac.signal.aborted) opts.onText?.(final, plain(final))
     // The model asked for images: make them in the background (each one still passes the safety gate).
     if (!blocked && !ac.signal.aborted)
       for (const [, prompt] of [...result.text.matchAll(IMAGE_TAG)].slice(0, 2)) {
@@ -372,7 +404,7 @@ async function runChat(chatId: string, opts: { voice?: boolean; onText?: (full: 
     return final
   } catch (e) {
     if (ac.signal.aborted) {
-      updateMessage(chatId, msg.id, (m) => ({ ...m, status: 'stopped' }))
+      updateMessage(chatId, msg.id, (m) => ({ ...m, status: 'stopped', toolActivity: undefined }))
       return ''
     }
     const err = (e as Error)?.message ?? String(e)
@@ -382,6 +414,7 @@ async function runChat(chatId: string, opts: { voice?: boolean; onText?: (full: 
     updateMessage(chatId, msg.id, (m) => ({
       ...m,
       status: 'failed',
+      toolActivity: undefined,
       text: oom ? 'Your graphics card ran out of memory. Close other GPU-heavy tabs or apps, then try again.' : `Something interrupted that (${err.slice(0, 160)}). Your request is saved. Try again when you’re ready.`,
     }))
     return ''
@@ -732,6 +765,8 @@ let reading: { id: string; speech: Speech } | null = null
 const plain = (t: string) =>
   t
     .replace(/<think>[\s\S]*?<\/think>/g, '')
+    .replace(/<tool_(?:call|response)>[\s\S]*?(?:<\/tool_(?:call|response)>|$)/gi, '')
+    .replace(/\[\d+\]/g, '')
     .replace(/```[\s\S]*?```/g, ' (code) ')
     .replace(/[*_`#>|]/g, '')
     .replace(/\[(.*?)\]\(.*?\)/g, '$1')
