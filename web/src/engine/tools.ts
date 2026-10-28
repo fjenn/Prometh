@@ -323,7 +323,7 @@ export function createToolRuntime(options: {
   request?: string
 }) {
   const sources: Source[] = [], hints = new Map<string, ConnectorTool>()
-  let autoExecuted = false
+  let autoExecuted = ''
   const plainRead = plainReadIntent(options.request ?? '')
   const runAction = async (tool: string, args: Record<string, unknown>, hint: ConnectorTool) => {
     options.onActivity(`Using ${appName(toolkitFrom(tool, hint.toolkit))}…`)
@@ -371,13 +371,15 @@ export function createToolRuntime(options: {
         const result = await api<{ items: ConnectorTool[] }>('connectors/tools/search', args, options.signal)
         for (const item of result.items) hints.set(item.slug.toUpperCase(), item)
         const top = result.items[0]
+        // Searching again after the direct read would only repeat it; point back at the result instead.
+        if (autoExecuted && top && top.slug.toUpperCase() === autoExecuted) return JSON.stringify({ ok: false, error: `Already done: ${autoExecuted} ran and its result is above. Answer from it, or search for a different action.` })
         if (plainRead && !autoExecuted && top && classify(top.slug, top.tags) === 'read' && (!Array.isArray(top.input_parameters.required) || top.input_parameters.required.length === 0)) {
-          autoExecuted = true
           const tool = top.slug.toUpperCase(), name = actionName(tool, top)
+          autoExecuted = tool
           const otherActions: { slug: string; name: string }[] = []
           for (const item of result.items.slice(1)) {
             const action = { slug: item.slug, name: actionName(item.slug, item) }
-            if (JSON.stringify([...otherActions, action]).length > 1000) break
+            if (otherActions.length === 5 || JSON.stringify([...otherActions, action]).length > 500) break
             otherActions.push(action)
           }
           // Reserve space for the alternatives; all hints remain registered, including omitted schemas.
