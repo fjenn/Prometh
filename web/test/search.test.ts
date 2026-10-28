@@ -20,6 +20,21 @@ test('search excerpts have a fixed total context budget', () => {
   assert.ok(note.length <= 3600, String(note.length))
   for (const hit of hits) assert.ok(note.includes(`[${hit.index}] title`))
 })
+test('search note starts with the only numbered sources and requires citations after each sourced fact', () => {
+  const hits = [4, 5, 6].map((index) => ({ index, title: `Article ${index}`, url: `https://example.org/${index}`, body: 'Fetched facts.' }))
+  const note = promptNote(hits)
+  assert.ok(note.startsWith('These are the only sources you may cite or name: [4] Article 4; [5] Article 5; [6] Article 6.'))
+  assert.match(note, /Cite \[n\] after each sourced fact\./)
+  assert.match(note, /State only facts present in the Page text\./)
+  assert.ok(note.indexOf('Cite [n]') < note.indexOf('Page text:\n'))
+})
+test('source instructions and long metadata share the total excerpt budget', () => {
+  const hits = [1, 2, 3].map((index) => ({ index, title: 'T'.repeat(1000), url: 'https://example.org/' + 'u'.repeat(2000), body: 'word '.repeat(10000) }))
+  const note = promptNote(hits)
+  assert.ok(note.length <= 3600, String(note.length))
+  assert.match(note, /Cite \[n\] after each sourced fact\./)
+  assert.equal(note.split('Page text:\n').length - 1, 3)
+})
 test('cited links show only valid cited fetched sources, ignoring code and reasoning', () => {
   const sources = [1, 2, 3].map((index) => ({ index, title: 'T', url: 'https://a.org/' + index }))
   assert.deepEqual(citedLinks(sources, '<think>[3]</think>Fact [2][1][2] [99] `code [3]`'), sources.slice(0, 2))

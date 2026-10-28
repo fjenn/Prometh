@@ -182,12 +182,21 @@ export function createToolRuntime(options: {
     options.onActivity('Searching the web…')
     try {
       const data = await api<{ results: SearchResult[] }>('search?q=' + encodeURIComponent(query.slice(0, 300)), undefined, options.signal)
-      const selected = preferDistinctDomains(data.results)
-      options.onActivity(`Reading ${selected.length} pages…`)
+      const selected = preferDistinctDomains(data.results, 8)
       const pages = new Map<string, { title: string; url: string; text: string }>()
-      await Promise.all(selected.map(async (hit) => {
-        try { pages.set(hit.url, await api('read?url=' + encodeURIComponent(hit.url), undefined, options.signal)) } catch { /* unread pages are never numbered */ }
-      }))
+      for (let start = 0; start < selected.length && pages.size < 3;) {
+        options.signal.throwIfAborted()
+        const batch = selected.slice(start, start + 3 - pages.size)
+        start += batch.length
+        options.onActivity(`Reading ${batch.length} pages…`)
+        await Promise.all(batch.map(async (hit) => {
+          try {
+            const page = await api<{ title: string; url: string; text: string }>('read?url=' + encodeURIComponent(hit.url), undefined, options.signal)
+            if (page.text.trim()) pages.set(hit.url, page)
+          } catch { /* unread pages are never numbered */ }
+        }))
+      }
+      options.signal.throwIfAborted()
       const hits = indexedHits(selected, pages, sources.length)
       sources.push(...hits.map(({ index, title, url }) => ({ index, title, url })))
       options.onSources([...sources])

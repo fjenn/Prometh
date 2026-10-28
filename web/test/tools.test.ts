@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { boundedJSON, budgetTurns, compactSchema, hideToolMarkup, parseToolCalls, runConnectorAction, runToolLoop, schemas, toolsBlock, type Turn } from '../src/engine/tools.ts'
+import { boundedJSON, budgetTurns, compactSchema, createToolRuntime, hideToolMarkup, parseToolCalls, runConnectorAction, runToolLoop, schemas, toolsBlock, type Turn } from '../src/engine/tools.ts'
+import type { Source } from '../src/engine/search.ts'
 const toolCall = (name = 'web_search', args = { query: 'test' }) => `<tool_call>${JSON.stringify({ name, arguments: args })}</tool_call>`
 const initial: Turn[] = [{ role: 'system', content: 'base' }, { role: 'user', content: 'question' }]
 test('parser tolerates single quotes, unquoted keys, trailing commas and stringified arguments', () => {
@@ -54,7 +55,7 @@ test('invalid JSON and unavailable tools feed an error without execution', async
 test('prefetch happens before generation and source rules apply only with sources', async () => {
   let prefetched = false
   await runToolLoop({ messages: initial, tools: schemas(true, []), signal: new AbortController().signal, onText: () => {}, prefetch: async () => { prefetched = true; return '[1] Fetched page' }, hasSources: () => true,
-    generate: async (messages) => { assert.ok(prefetched); assert.match(messages[0].content, /Cite sourced facts/); assert.match(messages.at(-1)!.content, /Fetched page/); return { text: 'Answer' } }, execute: async () => '{}',
+    generate: async (messages) => { assert.ok(prefetched); assert.match(messages[0].content, /Never invent sources or claims/); assert.match(messages.at(-1)!.content, /Fetched page/); return { text: 'Answer' } }, execute: async () => '{}',
   })
 })
 test('writes wait for approval; declines do not execute; reads run without approved flag', async () => {
@@ -107,7 +108,7 @@ test('question survives large intermediate tool turns and valid tool JSON is nev
 })
 test('prefetch failures become context, allowing a final answer without invented sources', async () => {
   await runToolLoop({ messages: initial, tools: schemas(true, []), signal: new AbortController().signal, onText: () => {}, prefetch: async () => { throw new Error('Search unavailable') }, hasSources: () => false,
-    generate: async (messages) => { assert.match(messages.at(-1)!.content, /Search unavailable/); assert.ok(!messages[0].content.includes('Cite sourced facts')); return { text: 'The web is unavailable.' } }, execute: async () => '{}',
+    generate: async (messages) => { assert.match(messages.at(-1)!.content, /Search unavailable/); assert.ok(!messages[0].content.includes('Never invent sources or claims')); return { text: 'The web is unavailable.' } }, execute: async () => '{}',
   })
 })
 
@@ -138,4 +139,68 @@ test('without tool results, long attachments retain the available context budget
   assert.equal(turns.at(-1)!.content, request)
   const limited = budgetTurns([{ role: 'system', content: 'x'.repeat(8000) }, { role: 'user', content: 'y'.repeat(5000) }])
   assert.ok(limited.reduce((sum, t) => sum + Math.ceil(t.content.length / 3) + 8, 0) + 850 + 64 <= 4096)
+})
+
+test('search reads past failed and empty pages with bounded concurrency and stops at three successes', async (t) => {
+  const results = Array.from({ length: 9 }, (_, i) => ({ title: `Result ${i}`, url: `https://site${i}.org/article`, snippet: 'Not fetched' }))
+  const reads: string[] = []
+  let sources: Source[] = [], active = 0, peak = 0
+  const runtime = createToolRuntime({ signal: new AbortController().signal, onActivity: () => {}, onSources: (s) => { sources = s }, getAllowed: () => [], approve: async () => 'decline' })
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = new URL(String(input), 'http://localhost')
+    if (url.pathname === '/api/search') return Response.json({ results: [results[0], { ...results[0], url: 'https://www.site0.org/duplicate' }, ...results.slice(1)] })
+    const target = url.searchParams.get('url')!
+    reads.push(target)
+    peak = Math.max(peak, ++active)
+    await new Promise((resolve) => setImmediate(resolve))
+    active--
+    const i = results.findIndex((r) => r.url === target)
+    if (i < 2) return Response.json({ ok: false, error: i === 0 ? 'Page exceeds 3 MB' : 'HTTP 401' }, { status: 400 })
+    return Response.json({ title: `Fetched ${i}`, url: target, text: i === 3 ? ' \n ' : `Facts ${i}` })
+  })
+  const note = await runtime.search('recent news')
+  assert.deepEqual(reads, results.slice(0, 6).map((r) => r.url))
+  assert.equal(peak, 3)
+  assert.deepEqual(sources, [2, 4, 5].map((i, n) => ({ index: n + 1, title: `Fetched ${i}`, url: results[i].url })))
+  assert.ok(note.startsWith('These are the only sources you may cite or name: [1] Fetched 2; [2] Fetched 4; [3] Fetched 5.'))
+  assert.ok(!note.includes('Not fetched'))
+  assert.ok(!note.includes('[4]'))
+  assert.ok(note.length <= 3600)
+  assert.ok(runtime.hasSources())
+})
+
+test('search stops at eight candidates or exhaustion when all pages fail', async (t) => {
+  for (const count of [2, 10]) {
+    const results = Array.from({ length: count }, (_, i) => ({ title: `Result ${i}`, url: `https://site${i}.org/article`, snippet: '' }))
+    let reads = 0, sources: Source[] = []
+    const runtime = createToolRuntime({ signal: new AbortController().signal, onActivity: () => {}, onSources: (s) => { sources = s }, getAllowed: () => [], approve: async () => 'decline' })
+    const mock = t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+      if (String(input).startsWith('/api/search?')) return Response.json({ results })
+      reads++
+      throw new Error('Unreadable')
+    })
+    try {
+      assert.match(await runtime.search('recent news'), /No sources are available to cite/)
+      assert.equal(reads, Math.min(count, 8))
+      assert.deepEqual(sources, [])
+      assert.ok(!runtime.hasSources())
+    } finally { mock.mock.restore() }
+  }
+})
+
+test('search cancellation prevents further candidate batches and clears activity', async (t) => {
+  const controller = new AbortController(), activity: (string | undefined)[] = []
+  let reads = 0, published = false
+  const results = Array.from({ length: 8 }, (_, i) => ({ title: `Result ${i}`, url: `https://site${i}.org/article`, snippet: '' }))
+  const runtime = createToolRuntime({ signal: controller.signal, onActivity: (s) => { activity.push(s) }, onSources: () => { published = true }, getAllowed: () => [], approve: async () => 'decline' })
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input).startsWith('/api/search?')) return Response.json({ results })
+    assert.ok(init?.signal)
+    if (++reads === 3) { controller.abort(); assert.ok(init.signal.aborted) }
+    throw new Error('Unreadable')
+  })
+  await assert.rejects(runtime.search('recent news'), /abort/i)
+  assert.equal(reads, 3)
+  assert.equal(published, false)
+  assert.equal(activity.at(-1), undefined)
 })
