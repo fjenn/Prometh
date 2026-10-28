@@ -255,6 +255,7 @@ export function createToolRuntime(options: {
       const tool = String(args.tool ?? '').trim().toUpperCase()
       if (!/^[A-Z0-9_]+$/.test(tool) || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) return '{"ok":false,"executed":false,"error":"Invalid tool or arguments"}'
       const hint = hints.get(tool)
+      if (hint === undefined) return '{"ok":false,"executed":false,"error":"Unknown action slug. Use an exact slug returned by connectors_search, or search again."}'
       options.onActivity(`Using ${appName(toolkitFrom(tool, hint?.toolkit))}…`)
       const result = await runConnectorAction({ tool, arguments: args.arguments as Record<string, unknown>, hint, keys: options.getAllowed(), approve: options.approve,
         execute: async (approved) => {

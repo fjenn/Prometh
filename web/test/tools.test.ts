@@ -173,6 +173,41 @@ test('writes wait for approval; declines do not execute; reads run without appro
   assert.equal(declined.declined, true)
   await runConnectorAction({ tool: 'GITHUB_LIST_REPOS', arguments: {}, keys: [], approve: async () => { throw new Error('must not ask') }, execute: async (approved) => { assert.equal(approved, false); return { ok: true } } })
 })
+test('runtime rejects unsearched and truncated connector slugs without approval or execution', async (t) => {
+  let approvals = 0
+  const createRuntime = () => createToolRuntime({ signal: new AbortController().signal, onActivity: () => {}, onSources: () => {}, getAllowed: () => [], approve: async () => { approvals++; return 'once' } })
+  const runtime = createRuntime()
+  const fetch = t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    assert.equal(String(input), '/api/connectors/tools/search')
+    return Response.json({ items: [{ slug: 'GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER', name: 'List repositories', description: 'List my repositories', tags: ['readOnlyHint'], toolkit: 'github', input_parameters: { type: 'object' } }] })
+  })
+  const expected = { ok: false, executed: false, error: 'Unknown action slug. Use an exact slug returned by connectors_search, or search again.' }
+  const execute = (tool: string) => ({ name: 'connectors_execute', arguments: { tool, arguments: {} } })
+  assert.deepEqual(JSON.parse(await runtime.execute(execute('GITHUB'))), expected)
+  assert.equal(fetch.mock.callCount(), 0)
+  await runtime.execute({ name: 'connectors_search', arguments: { query: 'list my repositories' } })
+  assert.deepEqual(JSON.parse(await runtime.execute(execute('GITHUB'))), expected)
+  assert.deepEqual(JSON.parse(await createRuntime().execute(execute('GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER'))), expected)
+  assert.equal(fetch.mock.callCount(), 1)
+  assert.equal(approvals, 0)
+})
+test('runtime executes a searched read action without approval', async (t) => {
+  let approvals = 0
+  const runtime = createToolRuntime({ signal: new AbortController().signal, onActivity: () => {}, onSources: () => {}, getAllowed: () => [], approve: async () => { approvals++; return 'once' } })
+  const tool = 'GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER'
+  const result = { ok: true, repositories: [{ name: 'example' }] }
+  const fetch = t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input) === '/api/connectors/tools/search') return Response.json({ items: [{ slug: tool, name: 'List repositories', description: 'List my repositories', tags: ['readOnlyHint'], toolkit: 'github', input_parameters: { type: 'object' } }] })
+    assert.equal(String(input), '/api/connectors/tools/execute')
+    assert.equal(init?.method, 'POST')
+    assert.deepEqual(JSON.parse(String(init?.body)), { tool, arguments: { per_page: 10 }, approved: false })
+    return Response.json(result)
+  })
+  await runtime.execute({ name: 'connectors_search', arguments: { query: 'list my repositories' } })
+  assert.deepEqual(JSON.parse(await runtime.execute({ name: 'connectors_execute', arguments: { tool, arguments: { per_page: 10 } } })), result)
+  assert.equal(fetch.mock.callCount(), 2)
+  assert.equal(approvals, 0)
+})
 test('always allow is scoped to the exact action; authoritative server tags can still require a card', async () => {
   await runConnectorAction({ tool: 'GITHUB_CREATE_ISSUE', arguments: {}, keys: ['github:GITHUB_CREATE_ISSUE'], approve: async () => { throw new Error('should be allowed') }, execute: async (approved) => { assert.equal(approved, true); return { ok: true } } })
   let executions = 0, approvals = 0
