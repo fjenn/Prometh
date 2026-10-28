@@ -57,6 +57,9 @@ export interface Message {
   /** Image: seconds it took, and how many of those went into loading the model. */
   took?: { total: number; load: number }
   voice?: boolean
+  sources?: import('../engine/search').Source[]
+  toolActivity?: string
+  approval?: { id: string; tool: string; arguments: Record<string, unknown>; toolkit: string; name: string; action: string; logo?: string; detail: string; resolution?: 'once' | 'always' | 'decline' | 'cancelled' }
 }
 
 export interface Conversation {
@@ -88,6 +91,8 @@ export interface Snapshot {
   /** Mode the first chat opens in after onboarding. */
   defaultMode: Mode
   appearance: Appearance
+  webSearch: boolean
+  alwaysAllowed: string[]
   readAttachments: boolean
   chats: Conversation[]
   selectedChatId: string | null
